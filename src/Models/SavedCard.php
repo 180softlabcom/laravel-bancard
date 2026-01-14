@@ -92,10 +92,18 @@ class SavedCard extends Model
             return false;
         }
 
-        // expiration_date format: MM/YY or MMYY
-        $expDate = str_replace('/', '', $this->expiration_date);
-        $month = (int) substr($expDate, 0, 2);
-        $year = (int) ('20' . substr($expDate, 2, 2));
+        // expiration_date format: M/YY, MM/YY, MYY, or MMYY
+        if (str_contains($this->expiration_date, '/')) {
+            // Format: M/YY or MM/YY
+            [$month, $year] = explode('/', $this->expiration_date);
+            $month = (int) $month;
+            $year = (int) ('20' . $year);
+        } else {
+            // Format: MYY or MMYY (assume last 2 chars are year)
+            $expDate = $this->expiration_date;
+            $year = (int) ('20' . substr($expDate, -2));
+            $month = (int) substr($expDate, 0, -2);
+        }
 
         $expiry = \Carbon\Carbon::createFromDate($year, $month, 1)->endOfMonth();
 
