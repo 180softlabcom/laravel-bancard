@@ -4,16 +4,20 @@ Paquete Laravel para integración con Bancard VPOS 2.0 (Paraguay).
 
 ## Instalación
 
-### Instalación Local (Desarrollo)
+```bash
+composer require softlab180/laravel-bancard
+```
 
-Añadir el repositorio local en el `composer.json` de tu proyecto:
+### Instalación desde GitHub (repositorio privado/desarrollo)
+
+Añadir el repositorio en `composer.json`:
 
 ```json
 {
     "repositories": [
         {
-            "type": "path",
-            "url": "../packages/laravel-bancard"
+            "type": "vcs",
+            "url": "https://github.com/180softlabcom/laravel-bancard.git"
         }
     ]
 }
@@ -22,7 +26,7 @@ Añadir el repositorio local en el `composer.json` de tu proyecto:
 Luego instalar:
 
 ```bash
-composer require softlab180/laravel-bancard:@dev
+composer require softlab180/laravel-bancard:dev-main
 ```
 
 ### Publicar Configuración
