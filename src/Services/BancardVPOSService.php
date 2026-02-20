@@ -164,7 +164,6 @@ class BancardVPOSService
                 'description' => $description ?? $payable->getPayableDescription(),
                 'return_url' => $returnUrl,
                 'alias_token' => $aliasToken,
-                'extra_response_attributes' => ['confirmation.process_id'],
             ],
         ];
 
