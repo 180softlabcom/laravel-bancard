@@ -51,6 +51,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Checkout Script Version
+    |--------------------------------------------------------------------------
+    |
+    | Version of the Bancard checkout SDK served at
+    | {checkout}/javascript/dist/bancard-checkout-{version}.js
+    |
+    */
+    'checkout_script_version' => env('BANCARD_CHECKOUT_SCRIPT_VERSION', '4.0.0'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Default Currency
     |--------------------------------------------------------------------------
     |
@@ -79,9 +90,21 @@ return [
     */
     'webhook' => [
         'route_prefix' => env('BANCARD_WEBHOOK_PREFIX', 'webhooks/bancard'),
-        'middleware' => [], // Add 'api' or custom middleware if needed
+        'middleware' => ['throttle:60,1'], // Defensa básica. Sumá IP allow-list / verificación de firma para el endpoint de registro de tarjeta (no autenticado aún).
         'log_payloads' => env('BANCARD_LOG_WEBHOOKS', true),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Persist Transactions (idempotencia + conciliación)
+    |--------------------------------------------------------------------------
+    |
+    | Si está activo, el paquete registra cada operación en la tabla
+    | bancard_transactions (requiere correr la migración). Permite deduplicar
+    | callbacks reenviados por vPOS y conciliar pagos perdidos.
+    |
+    */
+    'persist_transactions' => env('BANCARD_PERSIST_TRANSACTIONS', true),
 
     /*
     |--------------------------------------------------------------------------

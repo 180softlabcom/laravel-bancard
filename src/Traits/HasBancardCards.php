@@ -69,6 +69,44 @@ trait HasBancardCards
     }
 
     /**
+     * Sincroniza las tarjetas catastradas desde Bancard hacia la base local.
+     *
+     * Este es el flujo de catastro DOCUMENTADO por Bancard: tras el éxito del
+     * iframe (`Bancard.Cards.createForm` → mensaje `add_new_card_success`), el
+     * comercio invoca `users_cards` para obtener el `alias_token` y persistir la
+     * tarjeta. No depende de un webhook (Bancard no envía callback de catastro).
+     *
+     * Usa getMorphClass()/getKey() para respetar morph maps y soportar múltiples
+     * modelos de usuario.
+     *
+     * @return \Illuminate\Support\Collection<int, SavedCard>
+     */
+    public function syncBancardCards(): \Illuminate\Support\Collection
+    {
+        $result = Bancard::getUserCards($this->getKey());
+
+        return collect($result['cards'] ?? [])
+            ->filter(fn ($card) => ! empty($card['alias_token']))
+            ->map(function (array $card) {
+                return SavedCard::updateOrCreate(
+                    [
+                        'user_type' => $this->getMorphClass(),
+                        'user_id' => $this->getKey(),
+                        'alias_token' => $card['alias_token'],
+                    ],
+                    [
+                        'card_masked_number' => $card['card_masked_number'] ?? null,
+                        'card_brand' => $card['card_brand'] ?? null,
+                        'card_type' => $card['card_type'] ?? null,
+                        'expiration_date' => $card['expiration_date'] ?? null,
+                        'card_id' => $card['card_id'] ?? null,
+                    ]
+                );
+            })
+            ->values();
+    }
+
+    /**
      * Delete a saved card.
      */
     public function deleteBancardCard(string $aliasToken): array

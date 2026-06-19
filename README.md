@@ -1,265 +1,227 @@
 # Laravel Bancard
 
-Paquete Laravel para integración con Bancard VPOS 2.0 (Paraguay).
+Integración del gateway de pagos **Bancard VPOS 2.0** (Paraguay) para Laravel: pago ocasional (single buy), catastro y pago con token (tarjetas guardadas), confirmación por webhook, rollback y conciliación.
+
+> Verificado contra la documentación oficial *eCommerce – Compra Simple v1.23.1*.
 
 ## Instalación
 
-```bash
-composer require softlab180/laravel-bancard
-```
+El paquete se distribuye como repositorio Git (no está en Packagist).
 
-### Instalación desde GitHub (repositorio privado/desarrollo)
+### Opción A — desde GitHub (consumidores)
 
-Añadir el repositorio en `composer.json`:
-
-```json
-{
-    "repositories": [
-        {
-            "type": "vcs",
-            "url": "https://github.com/180softlabcom/laravel-bancard.git"
-        }
-    ]
+```jsonc
+// composer.json del proyecto consumidor
+"repositories": [
+    { "type": "vcs", "url": "https://github.com/180softlabcom/laravel-bancard.git" }
+],
+"require": {
+    "softlab180/laravel-bancard": "dev-main"
 }
 ```
 
-Luego instalar:
+### Opción B — repo local (desarrollo del paquete)
 
-```bash
-composer require softlab180/laravel-bancard:dev-main
+```jsonc
+"repositories": [
+    { "type": "path", "url": "../packages/laravel-bancard", "options": { "symlink": true } }
+],
+"require": { "softlab180/laravel-bancard": "*" }
 ```
 
-### Publicar Configuración
+```bash
+composer update softlab180/laravel-bancard
+```
+
+### Publicar configuración y migraciones
 
 ```bash
 php artisan vendor:publish --tag=bancard-config
-```
-
-### Publicar Migraciones (opcional)
-
-```bash
-php artisan vendor:publish --tag=bancard-migrations
-```
-
-### Ejecutar Migraciones
-
-```bash
+php artisan vendor:publish --tag=bancard-migrations   # opcional (ya se cargan automáticamente)
 php artisan migrate
 ```
 
+> **Importante:** desde la v1.1.0 hay una tabla nueva, `bancard_transactions` (idempotencia + conciliación). Corré `php artisan migrate` al actualizar. Si no querés persistencia, seteá `BANCARD_PERSIST_TRANSACTIONS=false`.
+
 ## Configuración
 
-Añadir las siguientes variables de entorno en `.env`:
-
 ```env
-BANCARD_PUBLIC_KEY=your_public_key
-BANCARD_PRIVATE_KEY=your_private_key
-BANCARD_ENVIRONMENT=staging  # o production
+BANCARD_PUBLIC_KEY=...
+BANCARD_PRIVATE_KEY=...
+BANCARD_ENVIRONMENT=staging            # staging | production
+BANCARD_CURRENCY=PYG
+BANCARD_FRONTEND_URL=https://miapp.com
+BANCARD_RETURN_URL=/payment/result
+BANCARD_CANCEL_URL=/payment/cancel
+BANCARD_PERSIST_TRANSACTIONS=true      # registra cada operación para idempotencia/conciliación
+BANCARD_CHECKOUT_SCRIPT_VERSION=4.0.0  # versión del SDK JS de checkout
+BANCARD_USER_MODEL="App\\Models\\User"
 ```
 
 ## Uso
 
-### Single Buy (Compra Ocasional)
+### 1. Implementar el contrato `Payable`
 
-```php
-use Softlab180\Bancard\Facades\Bancard;
-
-// Tu modelo debe implementar Softlab180\Bancard\Contracts\Payable
-$order = Order::find(1);
-
-$result = Bancard::createSingleBuy(
-    payable: $order,
-    description: 'Compra en Mi Tienda',
-    returnUrl: route('payment.success'),
-    cancelUrl: route('payment.cancel')
-);
-
-// Redirigir al checkout de Bancard
-$processId = $result['process_id'];
-$checkoutUrl = Bancard::getCheckoutUrl() . "/new?process_id={$processId}";
-```
-
-### Implementar Payable Interface
+Cualquier modelo cobrable (Orden, Suscripción, Factura…) implementa `Payable`:
 
 ```php
 use Softlab180\Bancard\Contracts\Payable;
 
 class Order extends Model implements Payable
 {
-    public function getPayableId(): int|string
-    {
-        return $this->id;
-    }
+    public function getPayableId(): int|string { return $this->id; }
+    public function getPayableAmount(): float|int { return $this->total; }   // p.ej. 150000 (Gs)
+    public function getPayableCurrency(): string { return 'PYG'; }
+    public function getPayableDescription(): string { return "Orden #{$this->id}"; }
 
-    public function getPayableAmount(): float|int
+    // El paquete llama estos hooks automáticamente:
+    public function storeBancardPayment(array $data): void
     {
-        return $this->total; // En guaraníes para PYG
+        // $data: shop_process_id, process_id, amount, currency
+        $this->update(['bancard_process_id' => $data['shop_process_id']]);
     }
-
-    public function getPayableCurrency(): string
-    {
-        return 'PYG';
-    }
-
-    public function getPayableDescription(): string
-    {
-        return "Orden #{$this->id}";
-    }
-
-    public function storeBancardPayment(array $paymentData): void
-    {
-        $this->update([
-            'bancard_process_id' => $paymentData['process_id'],
-            'payment_status' => 'pending',
-        ]);
-    }
-
-    public function markAsPaid(array $confirmationData): void
-    {
-        $this->update([
-            'payment_status' => 'paid',
-            'paid_at' => now(),
-        ]);
-    }
-
-    public function markAsFailed(array $errorData): void
-    {
-        $this->update(['payment_status' => 'failed']);
-    }
+    public function markAsPaid(array $confirmationData): void { $this->update(['status' => 'paid']); }
+    public function markAsFailed(array $errorData): void { $this->update(['status' => 'failed']); }
 }
 ```
 
-### Registro de Tarjetas (Zimple)
+### 2. Pago ocasional (Single Buy)
 
 ```php
+use Softlab180\Bancard\Facades\Bancard;
+
+$result = Bancard::createSingleBuy($order, description: 'Pago de la orden');
+// $result => shop_process_id, process_id, checkout_js_url, amount, currency, expires_at
+```
+
+En el frontend, renderizá el iframe con el SDK de Bancard (el `process_id` NO va como query string):
+
+```html
+<div id="bancard-checkout-container"></div>
+<script src="{{ $result['checkout_js_url'] }}"></script>
+<script>
+  const styles = { /* ... */ };
+  window.onload = () => Bancard.Checkout.createForm('bancard-checkout-container', '{{ $result['process_id'] }}', styles);
+</script>
+```
+
+> `checkout_js_url` = `https://{env}/checkout/javascript/dist/bancard-checkout-4.0.0.js`.
+
+### 3. Confirmación del pago (webhook)
+
+Bancard hace un **POST servidor-a-servidor** a la URL de confirmación que cargás en el panel de comercios de vPOS. Apuntala a la ruta del paquete:
+
+```
+POST https://miapp.com/webhooks/bancard/payment
+```
+
+El paquete valida el token, **responde HTTP 200** (requisito de vPOS: si no recibe 200 en ≤30 s marca la confirmación como inválida) y dispara el evento correspondiente. Vos solo escuchás los eventos (ver más abajo). La idempotencia está cubierta: un callback reenviado no vuelve a disparar el evento.
+
+### 4. Catastro de tarjetas (pago con token)
+
+Bancard **no envía webhook** de catastro: el flujo se completa en el frontend (iframe) y luego se sincroniza con `users_cards`.
+
+```php
+// Backend: iniciar el catastro
 use Softlab180\Bancard\Traits\HasBancardCards;
 
-class User extends Authenticatable
-{
-    use HasBancardCards;
-}
+class User extends Authenticatable { use HasBancardCards; }
 
-// Registrar nueva tarjeta
-$result = $user->registerBancardCard(
-    cardId: 1, // ID único para esta tarjeta
-    returnUrl: route('cards.registered')
-);
-
-// Redirigir al formulario de Bancard
-$checkoutUrl = Bancard::getCheckoutUrl() . "/register?process_id={$result['process_id']}";
+$result = $user->registerBancardCard(cardId: 1, returnUrl: route('cards.result'));
+// $result => process_id, checkout_js_url
 ```
 
-### Cobrar con Tarjeta Guardada
+```html
+<!-- Frontend: iframe de catastro -->
+<div id="bancard-checkout-container"></div>
+<script src="{{ $result['checkout_js_url'] }}"></script>
+<script>
+  window.onload = () => Bancard.Cards.createForm('bancard-checkout-container', '{{ $result['process_id'] }}', styles);
+  // El iframe emite { status: "add_new_card_success" } o { status: "add_new_card_fail" }.
+</script>
+```
 
 ```php
-// Cobrar con la tarjeta por defecto
-$result = $user->chargeDefaultCard(
-    payable: $order,
-    numberOfPayments: 1, // Cuotas
-    description: 'Pago mensual'
-);
+// Backend: al recibir add_new_card_success, persistir las tarjetas del usuario
+$cards = $user->syncBancardCards();   // llama users_cards y guarda los SavedCard (alias_token, etc.)
+```
 
-// Cobrar con tarjeta específica
-$card = $user->bancardCards()->first();
+> `syncBancardCards()` usa el morph class del modelo, así que **soporta múltiples modelos de usuario**.
+
+### 5. Cobrar con tarjeta guardada (charge / 3DS)
+
+```php
+$result = $user->chargeDefaultCard($order, numberOfPayments: 1, description: 'Pago mensual');
+// o con una tarjeta específica:
 $result = $user->chargeBancardCard($card, $order);
 ```
 
-### Obtener Tarjetas del Usuario
+Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id` + `checkout_js_url` para renderizar el iframe de confirmación; la confirmación final llega al webhook `POST /webhooks/bancard/charge`.
+
+### 6. Tarjetas, confirmación y rollback
 
 ```php
-// Desde la base de datos local
-$cards = $user->bancardCards;
+$user->bancardCards;                         // tarjetas locales (SavedCard)
+$user->getBancardCards();                     // desde la API de Bancard
+$user->deleteBancardCard($card->alias_token); // borra en Bancard y local
 
-// Desde la API de Bancard
-$cardsFromApi = $user->getBancardCards();
-```
-
-### Eliminar Tarjeta
-
-```php
-$card = $user->bancardCards()->first();
-$user->deleteBancardCard($card->alias_token);
-```
-
-### Confirmar Estado de Pago
-
-```php
-$result = Bancard::getPaymentConfirmation($shopProcessId);
-
-if ($result['confirmation']['response_code'] === '00') {
-    // Pago exitoso
-}
-```
-
-### Rollback de Pago
-
-```php
-$result = Bancard::rollbackPayment($shopProcessId);
+Bancard::getPaymentConfirmation($shopProcessId); // consultar estado (si no llegó el webhook)
+Bancard::rollbackPayment($shopProcessId);        // reversar
 ```
 
 ## Eventos
 
-El paquete dispara los siguientes eventos que puedes escuchar:
-
-- `PaymentSucceeded` - Cuando un pago es exitoso
-- `PaymentFailed` - Cuando un pago falla
-- `CardRegistered` - Cuando se registra una tarjeta
-- `CardDeleted` - Cuando se elimina una tarjeta
-
-### Ejemplo de Listener
+- `PaymentSucceeded` — pago aprobado (single buy o charge)
+- `PaymentFailed` — pago rechazado
+- `CardRegistered` — tarjeta registrada
+- `CardDeleted` — tarjeta eliminada
 
 ```php
-// EventServiceProvider.php
-protected $listen = [
-    \Softlab180\Bancard\Events\PaymentSucceeded::class => [
-        \App\Listeners\HandlePaymentSuccess::class,
-    ],
-];
-```
-
-```php
-// HandlePaymentSuccess.php
 class HandlePaymentSuccess
 {
-    public function handle(PaymentSucceeded $event): void
+    public function handle(\Softlab180\Bancard\Events\PaymentSucceeded $event): void
     {
-        $shopProcessId = $event->shopProcessId;
-        $order = Order::where('bancard_process_id', $shopProcessId)->first();
-
-        if ($order) {
-            $order->markAsPaid($event->response);
-        }
+        $order = Order::where('bancard_process_id', $event->shopProcessId)->first();
+        $order?->markAsPaid($event->response);
     }
 }
 ```
 
+## Idempotencia y conciliación
+
+Con `persist_transactions` activo (default), el paquete registra cada operación en `bancard_transactions` (`shop_process_id` único). Esto permite:
+
+- **Deduplicar** callbacks reenviados por vPOS (el webhook hace un *claim* atómico y no re-dispara el evento).
+- **Conciliar** pagos perdidos: si no llegó el webhook, consultá `getPaymentConfirmation()` (vPOS recomienda esperar ~10 min) o `rollbackPayment()`.
+
 ## Webhooks
 
-Los webhooks se registran automáticamente en:
+Rutas registradas automáticamente (prefijo configurable con `bancard.webhook.route_prefix`):
 
-- `POST /webhooks/bancard/payment` - Confirmación de pago
-- `POST /webhooks/bancard/card-registration` - Registro de tarjeta
-- `POST /webhooks/bancard/charge` - Cobro con token (3DS)
+- `POST /webhooks/bancard/payment` — confirmación de pago (single buy)
+- `POST /webhooks/bancard/charge` — confirmación de pago con token (3DS)
+- `POST /webhooks/bancard/card-registration` — **no estándar**: Bancard no envía webhook de catastro; usá `syncBancardCards()`. Se mantiene solo para integraciones que lo configuren explícitamente.
 
-Asegúrate de excluir estas rutas de la verificación CSRF en `app/Http/Middleware/VerifyCsrfToken.php`:
+Las rutas traen `throttle:60,1` por defecto (`bancard.webhook.middleware`). Excluí el prefijo de CSRF:
 
 ```php
-protected $except = [
-    'webhooks/bancard/*',
-];
+// Laravel <= 10  (app/Http/Middleware/VerifyCsrfToken.php)
+protected $except = ['webhooks/bancard/*'];
+
+// Laravel 11+  (bootstrap/app.php)
+->withMiddleware(fn ($m) => $m->validateCsrfTokens(except: ['webhooks/bancard/*']))
 ```
+
+> Las rutas del paquete se cargan **sin** el grupo `web`, así que por defecto no aplican CSRF; el `$except` solo importa si agregás `web` al middleware.
 
 ## Testing
 
-Para testing, usa el ambiente `staging`:
-
-```env
-BANCARD_ENVIRONMENT=staging
+```bash
+composer install
+vendor/bin/phpunit
 ```
 
-Tarjetas de prueba en staging:
-- Visa: 4111111111111111
-- Mastercard: 5111111111111111
+Ambiente de pruebas: `BANCARD_ENVIRONMENT=staging`. Cédula de prueba para el iframe de catastro: `9661000`.
 
 ## Licencia
 

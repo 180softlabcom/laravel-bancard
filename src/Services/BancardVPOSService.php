@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Softlab180\Bancard\Contracts\Payable;
 use Softlab180\Bancard\Exceptions\BancardException;
+use Softlab180\Bancard\Models\BancardTransaction;
 
 class BancardVPOSService
 {
@@ -48,7 +49,7 @@ class BancardVPOSService
     ): array {
         $shopProcessId = $this->generateShopProcessId();
         $amount = $this->formatAmount($payable->getPayableAmount());
-        $currency = $payable->getPayableCurrency() ?? config('bancard.currency', 'PYG');
+        $currency = $payable->getPayableCurrency() ?: config('bancard.currency', 'PYG');
 
         $token = $this->generateToken([
             $this->privateKey,
@@ -57,9 +58,10 @@ class BancardVPOSService
             $currency,
         ]);
 
-        $frontendUrl = config('bancard.frontend_url');
-        $returnUrl = $returnUrl ?? $frontendUrl . config('bancard.return_url') . '?shop_process_id=' . $shopProcessId;
-        $cancelUrl = $cancelUrl ?? $frontendUrl . config('bancard.cancel_url') . '?shop_process_id=' . $shopProcessId;
+        $frontendUrl = rtrim((string) config('bancard.frontend_url'), '/');
+        $appendSpid = fn (string $url): string => $url.(str_contains($url, '?') ? '&' : '?').'shop_process_id='.urlencode($shopProcessId);
+        $returnUrl = $returnUrl ?? $appendSpid($frontendUrl.config('bancard.return_url'));
+        $cancelUrl = $cancelUrl ?? $appendSpid($frontendUrl.config('bancard.cancel_url'));
 
         $requestData = [
             'public_key' => $this->publicKey,
@@ -93,6 +95,8 @@ class BancardVPOSService
             }
 
             $processId = $responseData['process_id'];
+
+            $this->recordTransaction($payable, $shopProcessId, $processId, $amount, $currency, 'single_buy');
 
             return [
                 'success' => true,
@@ -138,7 +142,7 @@ class BancardVPOSService
     ): array {
         $shopProcessId = $this->generateShopProcessId();
         $amount = $this->formatAmount($payable->getPayableAmount());
-        $currency = $payable->getPayableCurrency() ?? config('bancard.currency', 'PYG');
+        $currency = $payable->getPayableCurrency() ?: config('bancard.currency', 'PYG');
 
         $token = $this->generateToken([
             $this->privateKey,
@@ -178,6 +182,8 @@ class BancardVPOSService
             $this->logResponse('charge', $responseData);
 
             $confirmation = $responseData['confirmation'] ?? [];
+
+            $this->recordTransaction($payable, $shopProcessId, $confirmation['process_id'] ?? null, $amount, $currency, 'charge');
 
             // Check if 3DS is required
             if (isset($confirmation['process_id']) && !empty($confirmation['process_id']) && empty($confirmation['response'])) {
@@ -631,7 +637,7 @@ class BancardVPOSService
             $currency,
         ]);
 
-        if ($receivedToken === $confirmToken) {
+        if ($receivedToken !== '' && hash_equals($confirmToken, $receivedToken)) {
             return true;
         }
 
@@ -665,7 +671,7 @@ class BancardVPOSService
             $aliasToken,
         ]);
 
-        return $receivedToken === $chargeToken;
+        return $receivedToken !== '' && hash_equals($chargeToken, $receivedToken);
     }
 
     /*
@@ -675,11 +681,57 @@ class BancardVPOSService
     */
 
     /**
+     * Registra la operación localmente (idempotencia + conciliación) e invoca el
+     * hook storeBancardPayment() del Payable. Best-effort: nunca bloquea el pago.
+     */
+    protected function recordTransaction(Payable $payable, string $shopProcessId, ?string $processId, string $amount, string $currency, string $type): void
+    {
+        if (config('bancard.persist_transactions', true)) {
+            try {
+                BancardTransaction::updateOrCreate(
+                    ['shop_process_id' => $shopProcessId],
+                    [
+                        'process_id' => $processId,
+                        'type' => $type,
+                        'status' => 'pending',
+                        'amount' => $amount,
+                        'currency' => $currency,
+                        'payable_type' => $payable::class,
+                        'payable_id' => (string) $payable->getPayableId(),
+                    ]
+                );
+            } catch (\Throwable $e) {
+                Log::warning('Bancard: no se pudo registrar la transacción', [
+                    'shop_process_id' => $shopProcessId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        try {
+            $payable->storeBancardPayment([
+                'shop_process_id' => $shopProcessId,
+                'process_id' => $processId,
+                'amount' => $amount,
+                'currency' => $currency,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Bancard: storeBancardPayment() del Payable falló', [
+                'shop_process_id' => $shopProcessId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
      * Generate a unique shop process ID.
      */
     protected function generateShopProcessId(): string
     {
-        return time() . rand(10000, 99999);
+        // shop_process_id es la clave de idempotencia y del token de confirmación;
+        // no admite colisiones. time().rand() colisiona bajo ráfaga, así que generamos
+        // un id numérico de 15 dígitos con entropía CSPRNG (6 de tiempo + 9 aleatorios).
+        return substr((string) time(), -6).str_pad((string) random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -703,15 +755,22 @@ class BancardVPOSService
      */
     protected function buildCheckoutUrl(string $processId): string
     {
-        return $this->checkoutUrl . '/new?process_id=' . $processId;
+        // Bancard sirve el checkout en /checkout/{process_id} (igual que el servicio
+        // de producción). El antiguo /new?process_id= devolvía HTTP 404.
+        return $this->checkoutUrl . '/' . $processId;
     }
 
     /**
      * Build checkout script URL for embedding.
      */
-    protected function buildCheckoutScriptUrl(string $processId): string
+    protected function buildCheckoutScriptUrl(?string $processId = null): string
     {
-        return $this->checkoutUrl . '/js/bancard-checkout-' . ($this->environment === 'production' ? 'v2' : 'sandbox') . '.js?process_id=' . $processId;
+        // SDK estático de Bancard: mismo archivo en staging y producción (solo cambia
+        // el host). El process_id NO va como query string del .js; se pasa en el front a
+        // Bancard.Checkout.createForm(container, process_id). La ruta /js/...-v2.js daba 404.
+        $version = config('bancard.checkout_script_version', '4.0.0');
+
+        return $this->checkoutUrl . '/javascript/dist/bancard-checkout-' . $version . '.js';
     }
 
     /**
