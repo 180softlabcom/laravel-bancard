@@ -16,7 +16,9 @@ return new class extends Migration
             $table->string('status')->default('pending');  // pending | paid | failed | rolled_back
             $table->string('amount')->nullable();
             $table->string('currency', 3)->nullable();
-            $table->nullableMorphs('payable'); // payable_type + payable_id
+            // payable_id como CHAR(36): soporta tanto IDs enteros (guardados como
+            // string) como UUIDs. recordTransaction() siempre castea a string.
+            $table->nullableUuidMorphs('payable'); // payable_type + payable_id
             $table->string('authorization_number')->nullable();
             $table->string('ticket_number')->nullable();
             $table->json('last_payload')->nullable();

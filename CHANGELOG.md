@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1] - 2026-06-22
+
+### Fixed
+- `bancard_transactions.payable_id` ahora es **CHAR(36)** (`nullableUuidMorphs`) en vez de BIGINT → soporta `Payable` con **ID entero y con UUID** (`recordTransaction()` siempre castea a string; un entero entra como texto, un UUID también). Antes, un Payable con UUID rompía el insert. Necesario p.ej. para consumidores con modelos UUID.
+
+### Nota / limitación conocida
+- `bancard_saved_cards.user_id` sigue siendo `unsignedBigInteger`. Sirve para modelos de usuario con ID entero (todos los consumidores actuales). Si en el futuro un consumidor usa **usuarios con UUID**, esa tabla requeriría el mismo tratamiento (string/uuid) — se difiere por ser una tabla ya publicada.
+
 ## [1.1.0] - 2026-06-15
 
 ### Fixed
