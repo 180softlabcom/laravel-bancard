@@ -23,7 +23,7 @@ class WebhookController extends Controller
     {
         $payload = $request->all();
 
-        Log::info('Bancard payment webhook received', ['payload' => $payload]);
+        $this->logReceived('Bancard payment webhook received', $payload);
 
         try {
             $result = Bancard::processWebhook($payload);
@@ -48,7 +48,7 @@ class WebhookController extends Controller
                     shopProcessId: (string) ($result['shop_process_id'] ?? ''),
                     response: ['confirmation' => $result],
                     errorCode: $result['response_code'] ?? null,
-                    errorMessage: $result['response_description'] ?? null,
+                    errorMessage: $result['extended_response_description'] ?? $result['response_description'] ?? null,
                 );
             }
 
@@ -84,7 +84,7 @@ class WebhookController extends Controller
     {
         $payload = $request->all();
 
-        Log::info('Bancard card registration webhook received', ['payload' => $payload]);
+        $this->logReceived('Bancard card registration webhook received', $payload);
 
         try {
             $operation = $payload['operation'] ?? [];
@@ -146,7 +146,7 @@ class WebhookController extends Controller
     {
         $payload = $request->all();
 
-        Log::info('Bancard charge with token webhook received', ['payload' => $payload]);
+        $this->logReceived('Bancard charge with token webhook received', $payload);
 
         try {
             $operation = $payload['operation'] ?? [];
@@ -179,7 +179,7 @@ class WebhookController extends Controller
                     shopProcessId: (string) ($operation['shop_process_id'] ?? ''),
                     response: ['confirmation' => $operation],
                     errorCode: $operation['response_code'] ?? null,
-                    errorMessage: $operation['response_description'] ?? null,
+                    errorMessage: $operation['extended_response_description'] ?? $operation['response_description'] ?? null,
                 );
             }
 
@@ -191,6 +191,20 @@ class WebhookController extends Controller
             ]);
 
             return response()->json(['status' => 'error'], 500);
+        }
+    }
+
+    /**
+     * Loguea la recepción del webhook. El payload completo solo se loguea si
+     * `bancard.webhook.log_payloads` está activo (BANCARD_LOG_WEBHOOKS); si no,
+     * loguea únicamente el shop_process_id (higiene en producción).
+     */
+    protected function logReceived(string $label, array $payload): void
+    {
+        if (config('bancard.webhook.log_payloads', true)) {
+            Log::info($label, ['payload' => $payload]);
+        } else {
+            Log::info($label, ['shop_process_id' => $payload['operation']['shop_process_id'] ?? null]);
         }
     }
 

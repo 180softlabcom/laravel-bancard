@@ -18,6 +18,7 @@ Este archivo es para quien **mantiene** el paquete. Para *usarlo* desde un proye
 3. **`amount` con 2 decimales** (`number_format($n, 2, '.', '')`), comparaciones de token con `hash_equals`.
 4. **El catastro NO tiene webhook** servidor-a-servidor: se completa con el iframe (`Bancard.Cards.createForm` → `add_new_card_success`) + `users_cards`. Ver `HasBancardCards::syncBancardCards()`.
 5. **SDK de checkout**: `{checkout}/javascript/dist/bancard-checkout-{version}.js` (mismo archivo en staging/producción, solo cambia el host). El `process_id` va por JS (`createForm`), no como query string.
+6. **Propagá todo el resultado**: `processWebhook()` debe devolver TODOS los campos legibles de la confirmación (incl. `extended_response_description`/`response_details`), no solo el código. Para errores de operaciones del cliente, mantené `raw_response` (con `messages[].key`) en el array de retorno. El log del payload del webhook se gatea con `bancard.webhook.log_payloads` (no loguear el payload completo en prod por defecto).
 
 ## Arquitectura
 

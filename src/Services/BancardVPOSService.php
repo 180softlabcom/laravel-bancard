@@ -609,6 +609,9 @@ class BancardVPOSService
             'is_paid' => $isSuccessful,
             'response_code' => $operation['response_code'] ?? null,
             'response_description' => $operation['response_description'] ?? null,
+            // Motivo legible/detallado del resultado (p.ej. "VALOR INCORRECTO DEL CVV2").
+            'extended_response_description' => $operation['extended_response_description'] ?? null,
+            'response_details' => $operation['response_details'] ?? null,
             'authorization_number' => $operation['authorization_number'] ?? null,
             'ticket_number' => $operation['ticket_number'] ?? null,
             'amount' => $operation['amount'] ?? null,

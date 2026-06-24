@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0] - 2026-06-22
+
+### Added / Changed
+- `processWebhook()` ahora propaga **`extended_response_description`** (motivo legible del rechazo, p.ej. "VALOR INCORRECTO DEL CVV2") y `response_details`, no solo el código. `PaymentFailed.errorMessage` usa el motivo detallado (`extended_response_description ?? response_description`).
+- El log del payload del webhook ahora **respeta `BANCARD_LOG_WEBHOOKS`** (`bancard.webhook.log_payloads`): con `false` se loguea solo el `shop_process_id`. Antes el controller logueaba el payload completo siempre (independiente del flag).
+- README ampliado para integradores/agentes: campos del evento, manejo de errores vía `raw_response.messages[].key`, logging y seguridad del webhook.
+
 ## [1.1.1] - 2026-06-22
 
 ### Fixed

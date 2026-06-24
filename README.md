@@ -187,6 +187,32 @@ class HandlePaymentSuccess
 }
 ```
 
+### Datos del evento y manejo de errores
+
+`PaymentSucceeded` / `PaymentFailed` reciben:
+
+- `shopProcessId` (string)
+- `response` → `['confirmation' => [...]]` con los campos planos de la confirmación: `is_paid`, `response_code`, `response_description`, **`extended_response_description`** (motivo legible/detallado, p.ej. *"VALOR INCORRECTO DEL CVV2"*), `response_details`, `authorization_number`, `ticket_number`, `amount`, `currency`, `security_information`.
+- `PaymentFailed` además trae `errorCode` (= `response_code`) y `errorMessage` (= `extended_response_description` ?? `response_description`, el motivo legible).
+
+```php
+public function handle(PaymentFailed $event): void
+{
+    Log::warning('Pago rechazado', [
+        'shop_process_id' => $event->shopProcessId,
+        'code'   => $event->errorCode,    // p.ej. "05"
+        'reason' => $event->errorMessage, // motivo legible
+    ]);
+}
+```
+
+**Errores de operaciones del cliente** (`rollbackPayment`, `getPaymentConfirmation`, etc.): además del string `error`, el array trae **`raw_response`** con el payload crudo de Bancard, incluyendo `messages[].key` (código estructurado). Usalo para distinguir casos en vez de parsear texto — p.ej. una reversa fuera de ventana:
+
+```php
+$res = Bancard::rollbackPayment($shopProcessId);
+$key = $res['raw_response']['messages'][0]['key'] ?? null; // p.ej. "AlreadyRollbackedError"
+```
+
 ## Idempotencia y conciliación
 
 Con `persist_transactions` activo (default), el paquete registra cada operación en `bancard_transactions` (`shop_process_id` único). Esto permite:
@@ -213,6 +239,11 @@ protected $except = ['webhooks/bancard/*'];
 ```
 
 > Las rutas del paquete se cargan **sin** el grupo `web`, así que por defecto no aplican CSRF; el `$except` solo importa si agregás `web` al middleware.
+
+### Logging y seguridad
+
+- **Logging del payload**: por defecto el webhook loguea el payload a nivel `info`. En producción seteá **`BANCARD_LOG_WEBHOOKS=false`** para loguear solo el `shop_process_id`. Desde v1.2.0 ese flag **sí** gatea el log del controller (antes el payload se logueaba igual). El payload de Bancard no trae PAN/CVV, pero es buena higiene.
+- **Ruta de card-registration**: `/webhooks/bancard/card-registration` **no valida token** y el catastro no usa webhook (usá `syncBancardCards()`). Si solo usás single_buy / charge, **no la expongas** (no la cargues en el panel de Bancard) o protegela con IP allow-list.
 
 ## Testing
 

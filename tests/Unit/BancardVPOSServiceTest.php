@@ -69,6 +69,8 @@ class BancardVPOSServiceTest extends TestCase
             'shop_process_id' => $shop,
             'response' => 'S',
             'response_code' => '00',
+            'response_description' => 'Transaccion aprobada',
+            'extended_response_description' => 'VALOR INCORRECTO DEL CVV2',
             'amount' => $amount,
             'currency' => $currency,
         ]]);
@@ -77,5 +79,8 @@ class BancardVPOSServiceTest extends TestCase
         $this->assertArrayNotHasKey('status', $result);
         $this->assertArrayNotHasKey('operation', $result);
         $this->assertSame($shop, $result['shop_process_id']);
+        // El motivo detallado debe propagarse (no solo el código).
+        $this->assertSame('VALOR INCORRECTO DEL CVV2', $result['extended_response_description']);
+        $this->assertArrayHasKey('response_details', $result);
     }
 }
