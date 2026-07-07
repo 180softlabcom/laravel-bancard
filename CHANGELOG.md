@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2] - 2026-07-07
+
+### Docs (corrección)
+- **Corrige el método 3DS del pago ocasional en el README/AGENTS.** La v1.2.1 decía —erróneamente— que el single_buy con 3DS usa `Bancard.Charge3DS.createForm`. **No es así:** el single_buy usa **siempre `Bancard.Checkout.createForm`** y el 3DS es transparente (el desafío se renderiza dentro del mismo iframe cuando el comercio está enrolado). `Charge3DS.createForm` es **exclusivo del pago con token (charge)**. Verificado contra el frontend de integración de referencia y contra el PDF (única sección "Flujo 3D SECURE" = "Pago con token - Charge", pág. 39-41).
+- Agrega la nota de **WebView/mobile**: el `baseUrl` del WebView debe ser `https://vpos.infonet.com.py` para que el desafío 3DS renderice (spec pág. 75).
+
+> El fix de código de la v1.2.1 (`extra_response_attributes` en charge) es correcto y se mantiene. Esta versión solo corrige documentación.
+
 ## [1.2.1] - 2026-07-07
 
 ### Fixed
