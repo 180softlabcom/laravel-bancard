@@ -107,19 +107,13 @@ En el frontend, renderizá el iframe con el SDK de Bancard (el `process_id` NO v
 
 > `checkout_js_url` = `https://{env}/checkout/javascript/dist/bancard-checkout-4.0.0.js`.
 
-#### 3DS en el pago ocasional (opcional)
+#### 3DS en el pago ocasional
 
-El 3DS del single buy es **transparente para el backend**: la llamada, el `process_id` y el `checkout_js_url` son **idénticos** con o sin 3DS. Lo único que cambia es **el método del SDK en el frontend**:
+El 3DS del single buy es **totalmente transparente**: se sigue usando **`Bancard.Checkout.createForm`** — **no** hay cambio de método. Si el comercio está enrolado en 3DS del lado de Bancard y la tarjeta lo exige, el desafío se renderiza **dentro del mismo iframe de `Checkout`**; el comercio no toca nada. La llamada `single_buy`, el `process_id` y el `checkout_js_url` son idénticos con o sin 3DS, y el resultado llega igual al webhook `POST /webhooks/bancard/payment` (con `security_information` → `risk_index`, etc.).
 
-```js
-// Sin 3DS:
-Bancard.Checkout.createForm('bancard-checkout-container', process_id, styles);
+> ⚠️ **No uses `Bancard.Charge3DS.createForm` para single_buy.** Ese método es exclusivo del **pago con token (charge)** — ver la sección 5. Para el pago ocasional, `Checkout.createForm` es siempre el método correcto.
 
-// Con 3DS (mismo process_id, mismo script):
-Bancard.Charge3DS.createForm('bancard-checkout-container', process_id, styles);
-```
-
-El desafío 3DS ocurre **dentro del mismo iframe** y el resultado llega igual al webhook `POST /webhooks/bancard/payment` (con `security_information` → `risk_index`, etc.). Como no todos los comercios usan 3DS, la elección del método es del integrador (p. ej. según un flag propio); el paquete no necesita configuración extra.
+> 📱 **WebView / mobile:** para que el desafío 3DS (que carga la página del emisor) renderice dentro de un WebView (React Native/Chromium), el WebView **debe** usar la URL base segura del servicio (spec pág. 75), p. ej. `source={{ html: getHtml(process_id), baseUrl: 'https://vpos.infonet.com.py' }}`. Con un esquema no seguro (`exp://`) el challenge no carga.
 
 ### 3. Confirmación del pago (webhook)
 
@@ -170,7 +164,7 @@ $result = $user->chargeDefaultCard($order, numberOfPayments: 1, description: 'Pa
 $result = $user->chargeBancardCard($card, $order);
 ```
 
-Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id` + `checkout_js_url`. En el frontend, renderizá el iframe de confirmación con **`Bancard.Charge3DS.createForm`** (mismo SDK que el pago ocasional):
+A diferencia del pago ocasional, el charge es una llamada servidor-a-servidor **sin iframe**. Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id` + `checkout_js_url`; **aquí sí** el frontend levanta un iframe de confirmación con **`Bancard.Charge3DS.createForm`** (este es el único flujo que usa `Charge3DS`):
 
 ```html
 <div id="bancard-checkout-container"></div>
@@ -183,6 +177,8 @@ Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id`
 La confirmación final llega al webhook `POST /webhooks/bancard/charge`.
 
 > El request de charge envía siempre `extra_response_attributes: ["confirmation.process_id"]` (requisito de la spec, pág. 37): es lo que hace que Bancard devuelva el `process_id` cuando la tarjeta exige 3DS. Sin ese atributo, un cobro 3DS se reportaría como rechazo.
+
+> 📱 **WebView / mobile:** igual que en el pago ocasional, el WebView debe usar `baseUrl: 'https://vpos.infonet.com.py'` para que el desafío 3DS renderice (spec pág. 75).
 
 ### 6. Tarjetas, confirmación y rollback
 
