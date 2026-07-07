@@ -168,6 +168,11 @@ class BancardVPOSService
                 'description' => $description ?? $payable->getPayableDescription(),
                 'return_url' => $returnUrl,
                 'alias_token' => $aliasToken,
+                // OBLIGATORIO para el flujo 3DS (spec pág. 37: "Siempre enviar este
+                // dato"). Sin esto, Bancard NO devuelve confirmation.process_id, por lo
+                // que un charge que exige 3DS caería en la rama "Payment rejected" en
+                // vez de disparar requires_3ds. También habilita bancard_proccessed.
+                'extra_response_attributes' => ['confirmation.process_id'],
             ],
         ];
 

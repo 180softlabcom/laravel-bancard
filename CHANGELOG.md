@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.1] - 2026-07-07
+
+### Fixed
+- **3DS de charge (crítico):** `chargeWithToken()` volvió a enviar `extra_response_attributes: ["confirmation.process_id"]` en el request. La spec (pág. 37) lo marca como **obligatorio** ("Siempre enviar este dato"): sin él, Bancard no devuelve `confirmation.process_id`, por lo que un cobro con token que exige 3DS caía en la rama *Payment rejected* en vez de disparar `requires_3ds`. Este atributo se había perdido en la refactorización de idempotencia de la v1.1.0 (regresión respecto a la rama publicada en GitHub).
+
+### Docs
+- README: se documenta cómo activar **3DS en el pago ocasional** (single_buy). El backend no cambia; en el frontend se usa `Bancard.Charge3DS.createForm(...)` en lugar de `Bancard.Checkout.createForm(...)` con el **mismo** `process_id` y `checkout_js_url`. Es opcional por comercio.
+- README: la sección de charge/3DS ahora nombra explícitamente `Bancard.Charge3DS.createForm` para el iframe de confirmación y aclara el rol de `extra_response_attributes`.
+
 ## [1.2.0] - 2026-06-22
 
 ### Added / Changed
