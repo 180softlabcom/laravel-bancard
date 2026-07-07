@@ -107,6 +107,20 @@ En el frontend, renderizá el iframe con el SDK de Bancard (el `process_id` NO v
 
 > `checkout_js_url` = `https://{env}/checkout/javascript/dist/bancard-checkout-4.0.0.js`.
 
+#### 3DS en el pago ocasional (opcional)
+
+El 3DS del single buy es **transparente para el backend**: la llamada, el `process_id` y el `checkout_js_url` son **idénticos** con o sin 3DS. Lo único que cambia es **el método del SDK en el frontend**:
+
+```js
+// Sin 3DS:
+Bancard.Checkout.createForm('bancard-checkout-container', process_id, styles);
+
+// Con 3DS (mismo process_id, mismo script):
+Bancard.Charge3DS.createForm('bancard-checkout-container', process_id, styles);
+```
+
+El desafío 3DS ocurre **dentro del mismo iframe** y el resultado llega igual al webhook `POST /webhooks/bancard/payment` (con `security_information` → `risk_index`, etc.). Como no todos los comercios usan 3DS, la elección del método es del integrador (p. ej. según un flag propio); el paquete no necesita configuración extra.
+
 ### 3. Confirmación del pago (webhook)
 
 Bancard hace un **POST servidor-a-servidor** a la URL de confirmación que cargás en el panel de comercios de vPOS. Apuntala a la ruta del paquete:
@@ -156,7 +170,19 @@ $result = $user->chargeDefaultCard($order, numberOfPayments: 1, description: 'Pa
 $result = $user->chargeBancardCard($card, $order);
 ```
 
-Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id` + `checkout_js_url` para renderizar el iframe de confirmación; la confirmación final llega al webhook `POST /webhooks/bancard/charge`.
+Si Bancard exige 3DS, `$result['requires_3ds'] === true` y devuelve `process_id` + `checkout_js_url`. En el frontend, renderizá el iframe de confirmación con **`Bancard.Charge3DS.createForm`** (mismo SDK que el pago ocasional):
+
+```html
+<div id="bancard-checkout-container"></div>
+<script src="{{ $result['checkout_js_url'] }}"></script>
+<script>
+  window.onload = () => Bancard.Charge3DS.createForm('bancard-checkout-container', '{{ $result['process_id'] }}', styles);
+</script>
+```
+
+La confirmación final llega al webhook `POST /webhooks/bancard/charge`.
+
+> El request de charge envía siempre `extra_response_attributes: ["confirmation.process_id"]` (requisito de la spec, pág. 37): es lo que hace que Bancard devuelva el `process_id` cuando la tarjeta exige 3DS. Sin ese atributo, un cobro 3DS se reportaría como rechazo.
 
 ### 6. Tarjetas, confirmación y rollback
 
