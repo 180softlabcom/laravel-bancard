@@ -156,24 +156,32 @@ class BancardVPOSService
         $frontendUrl = config('bancard.frontend_url');
         $returnUrl = $returnUrl ?? $frontendUrl . config('bancard.return_url') . '?shop_process_id=' . $shopProcessId;
 
+        $operation = [
+            'token' => $token,
+            'shop_process_id' => $shopProcessId,
+            'amount' => $amount,
+            'number_of_payments' => $numberOfPayments,
+            'currency' => $currency,
+            'additional_data' => '',
+            'description' => $description ?? $payable->getPayableDescription(),
+            'return_url' => $returnUrl,
+            'alias_token' => $aliasToken,
+        ];
+
+        // extra_response_attributes habilita el flujo 3DS: Bancard devuelve
+        // confirmation.process_id para levantar el iframe de desafío. Es OPT-IN
+        // (bancard.enable_3ds) porque REQUIERE que Bancard tenga habilitado el
+        // producto 3DS para el comercio: enviarlo sin ese permiso hace que Bancard
+        // RECHACE la operación ("parámetro extra no habilitado", con riesgo en
+        // producción — reportado por Bancard en homologación). Un comercio sin 3DS
+        // NO debe enviarlo. Para el flujo 3DS, la spec (pág. 37) pide enviarlo siempre.
+        if (config('bancard.enable_3ds', false)) {
+            $operation['extra_response_attributes'] = ['confirmation.process_id'];
+        }
+
         $requestData = [
             'public_key' => $this->publicKey,
-            'operation' => [
-                'token' => $token,
-                'shop_process_id' => $shopProcessId,
-                'amount' => $amount,
-                'number_of_payments' => $numberOfPayments,
-                'currency' => $currency,
-                'additional_data' => '',
-                'description' => $description ?? $payable->getPayableDescription(),
-                'return_url' => $returnUrl,
-                'alias_token' => $aliasToken,
-                // OBLIGATORIO para el flujo 3DS (spec pág. 37: "Siempre enviar este
-                // dato"). Sin esto, Bancard NO devuelve confirmation.process_id, por lo
-                // que un charge que exige 3DS caería en la rama "Payment rejected" en
-                // vez de disparar requires_3ds. También habilita bancard_proccessed.
-                'extra_response_attributes' => ['confirmation.process_id'],
-            ],
+            'operation' => $operation,
         ];
 
         $this->logRequest('charge', $requestData);

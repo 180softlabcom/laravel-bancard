@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.3] - 2026-07-13
+
+### Changed (corrección de v1.2.1)
+- **`extra_response_attributes` del charge ahora es OPT-IN (`bancard.enable_3ds`, default `false`).** La v1.2.1 lo enviaba **siempre**, pero **Bancard reportó en homologación** que ese parámetro **requiere el producto 3DS habilitado para el comercio**: enviarlo sin el permiso hace que Bancard **rechace la operación** (con riesgo en producción). Ahora solo se envía si `BANCARD_ENABLE_3DS=true`.
+  - ⚠️ **Migración:** los comercios que **ya usan 3DS** deben setear `BANCARD_ENABLE_3DS=true` (y confirmar el enrolamiento con Bancard). Los comercios **sin** 3DS no envían el parámetro y evitan el rechazo — no requieren acción.
+
 ## [1.2.2] - 2026-07-07
 
 ### Docs (corrección)
