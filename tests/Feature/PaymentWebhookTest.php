@@ -92,4 +92,37 @@ class PaymentWebhookTest extends TestCase
 
         Event::assertDispatchedTimes(PaymentSucceeded::class, 1);
     }
+
+    public function test_single_buy_aprobado_en_ruta_charge_no_se_rechaza(): void
+    {
+        // Bug real: Bancard usa UNA sola "URL de confirmación". Si el portal apunta
+        // a /charge, la confirmación de un single_buy (token "confirm", SIN
+        // alias_token) caía en handleChargeWithToken, se validaba solo con la
+        // fórmula "charge" → no coincidía → "rejected", sin disparar el evento y con
+        // la orden impaga pese al cobro. Debe aceptarse por la fórmula "confirm".
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        $res = $this->postJson('/webhooks/bancard/charge', $this->payload('00', 'S'));
+
+        $res->assertOk()->assertJson(['status' => 'success']);
+        Event::assertDispatched(PaymentSucceeded::class);
+        Event::assertNotDispatched(PaymentFailed::class);
+    }
+
+    public function test_charge_aprobado_en_ruta_payment_no_se_rechaza(): void
+    {
+        // Caso inverso: si el portal apunta a /payment, un charge/3DS (token
+        // "charge" + alias_token) también debe aceptarse.
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        $alias = 'alias-abc-123';
+        $chargeToken = md5($this->priv.$this->shop.'charge'.$this->amount.$this->currency.$alias);
+        $payload = $this->payload('00', 'S', token: $chargeToken);
+        $payload['operation']['alias_token'] = $alias;
+
+        $res = $this->postJson('/webhooks/bancard/payment', $payload);
+
+        $res->assertOk()->assertJson(['status' => 'success']);
+        Event::assertDispatched(PaymentSucceeded::class);
+    }
 }

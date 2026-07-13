@@ -150,11 +150,16 @@ class WebhookController extends Controller
 
         try {
             $operation = $payload['operation'] ?? [];
-            $aliasToken = $operation['alias_token'] ?? '';
 
-            if (! Bancard::validateChargeWebhookToken($operation, $aliasToken)) {
-                // Token inválido: no es un callback genuino. Logueamos y acusamos 200
-                // (un no-200 podría hacer perder un callback legítimo por misconfig).
+            // Aceptamos AMBAS fórmulas (confirm/charge): Bancard usa una sola "URL de
+            // confirmación" en el portal, así que por /charge puede llegar tanto un
+            // charge/3DS como un single_buy. Validar solo la fórmula "charge"
+            // rechazaba el single_buy (token "confirm", sin alias_token) → un pago
+            // aprobado quedaba como "rejected", sin evento y con la orden impaga.
+            if (! Bancard::validateConfirmationToken($operation)) {
+                // Token inválido con ambas fórmulas: no es un callback genuino.
+                // Logueamos y acusamos 200 (un no-200 podría hacer perder un callback
+                // legítimo por misconfig).
                 Log::warning('Invalid token in charge webhook', ['operation' => $operation]);
 
                 return response()->json(['status' => 'rejected'], 200);
