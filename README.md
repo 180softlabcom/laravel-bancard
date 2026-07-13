@@ -95,6 +95,8 @@ $result = Bancard::createSingleBuy($order, description: 'Pago de la orden');
 // $result => shop_process_id, process_id, checkout_js_url, amount, currency, expires_at
 ```
 
+> **Retorno del browser:** el paquete agrega el `shop_process_id` como query param al `return_url` (y al `cancel_url`) — **también si pasás una URL explícita** (`Bancard::createSingleBuy($order, returnUrl: route('pagos.resultado'))`). Es el identificador con el que tu endpoint de retorno identifica la transacción y consulta `getPaymentConfirmation()`; no dependas de la sesión, que en el retorno cross-site no viaja.
+
 En el frontend, renderizá el iframe con el SDK de Bancard (el `process_id` NO va como query string):
 
 ```html

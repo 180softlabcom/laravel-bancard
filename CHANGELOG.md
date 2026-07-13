@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.5] - 2026-07-13
+
+### Fixed
+- **`return_url`/`cancel_url` sin `shop_process_id` cuando el caller pasa una URL explícita (severidad alta).** `createSingleBuy()` y `chargeWithToken()` solo agregaban el `shop_process_id` a la URL de retorno en la rama por defecto; si el caller pasaba su propio `returnUrl`/`cancelUrl`, se enviaba tal cual. Como el paquete genera el `shop_process_id` internamente, el caller no puede incluirlo, así que su URL de retorno **nunca lo llevaba** → en el retorno del browser (contexto cross-site del iframe/redirect, sin cookie de sesión) el comercio no podía identificar la transacción y mostraba el pago como **fallido pese al cobro aprobado**. Ahora el `shop_process_id` se agrega **siempre** (a la URL provista o a la default), vía el helper `appendShopProcessId()`.
+- De paso, en `chargeWithToken()`: se corrige el `?` **hardcodeado** (rompía si `bancard.return_url` ya traía query → `...?a=b?shop_process_id=`) y se agrega el `rtrim` del `frontend_url` (evita doble slash). Ambos métodos usan ahora el mismo helper: separador `?`/`&` correcto, `rtrim`, e **idempotente** (no duplica si la URL ya trae `shop_process_id=`).
+
 ## [1.2.4] - 2026-07-13
 
 ### Fixed
