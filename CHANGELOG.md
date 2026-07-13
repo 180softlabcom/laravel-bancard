@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.4] - 2026-07-13
+
+### Fixed
+- **Webhook: confirmación rechazada como "Invalid token" (crítico, financiero).** Bancard usa **una sola "URL de confirmación"** en el portal y por ahí llegan **ambos** tipos de callback (single_buy → fórmula `confirm`; charge/3DS → fórmula `charge` + `alias_token`). El paquete validaba una sola fórmula por ruta: si el portal apuntaba a `/webhooks/bancard/charge`, la confirmación de un **single_buy aprobado** (sin `alias_token`) se rechazaba (`{"status":"rejected"}`), el evento `PaymentSucceeded` **nunca se disparaba** y la orden quedaba impaga pese al cobro real (con riesgo de rollback por vPOS). Ahora **ambos** endpoints (`/payment` y `/charge`) aceptan **cualquiera** de las dos fórmulas, vía el nuevo método público `Bancard::validateConfirmationToken()`. Es robusto sin importar qué URL configure el portal.
+
 ## [1.2.3] - 2026-07-13
 
 ### Changed (corrección de v1.2.1)

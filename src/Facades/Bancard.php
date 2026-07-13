@@ -15,6 +15,7 @@ use Softlab180\Bancard\Services\BancardVPOSService;
  * @method static array getPaymentConfirmation(string $shopProcessId)
  * @method static array rollbackPayment(string $shopProcessId)
  * @method static array processWebhook(array $payload)
+ * @method static bool validateConfirmationToken(array $operation)
  * @method static bool validateChargeWebhookToken(array $operation, string $aliasToken)
  * @method static bool isPaymentExpired(\DateTimeInterface $expiresAt)
  * @method static string getBaseUrl()
