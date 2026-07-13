@@ -58,10 +58,13 @@ class BancardVPOSService
             $currency,
         ]);
 
+        // El shop_process_id se genera acá (el caller no puede incluirlo), así que
+        // el paquete DEBE inyectarlo en la URL de retorno —tanto en la default como
+        // en la que provea el caller—: es el único identificador de la transacción
+        // en el retorno del browser (contexto cross-site, sin cookie de sesión).
         $frontendUrl = rtrim((string) config('bancard.frontend_url'), '/');
-        $appendSpid = fn (string $url): string => $url.(str_contains($url, '?') ? '&' : '?').'shop_process_id='.urlencode($shopProcessId);
-        $returnUrl = $returnUrl ?? $appendSpid($frontendUrl.config('bancard.return_url'));
-        $cancelUrl = $cancelUrl ?? $appendSpid($frontendUrl.config('bancard.cancel_url'));
+        $returnUrl = $this->appendShopProcessId($returnUrl ?? $frontendUrl.config('bancard.return_url'), $shopProcessId);
+        $cancelUrl = $this->appendShopProcessId($cancelUrl ?? $frontendUrl.config('bancard.cancel_url'), $shopProcessId);
 
         $requestData = [
             'public_key' => $this->publicKey,
@@ -153,8 +156,8 @@ class BancardVPOSService
             $aliasToken,
         ]);
 
-        $frontendUrl = config('bancard.frontend_url');
-        $returnUrl = $returnUrl ?? $frontendUrl . config('bancard.return_url') . '?shop_process_id=' . $shopProcessId;
+        $frontendUrl = rtrim((string) config('bancard.frontend_url'), '/');
+        $returnUrl = $this->appendShopProcessId($returnUrl ?? $frontendUrl.config('bancard.return_url'), $shopProcessId);
 
         $operation = [
             'token' => $token,
@@ -799,6 +802,26 @@ class BancardVPOSService
     protected function formatAmount(float|int $amount): string
     {
         return number_format($amount, 2, '.', '');
+    }
+
+    /**
+     * Agrega el shop_process_id como query param a una URL de retorno/cancelación.
+     *
+     * El paquete genera el shop_process_id, así que es quien debe inyectarlo en la
+     * URL de retorno: en el retorno del browser (contexto cross-site del iframe /
+     * redirect de Bancard) no viaja la cookie de sesión, por lo que el query param
+     * es el único identificador de la transacción del que dispone el comercio.
+     *
+     * Usa el separador correcto (`?` o `&`) y es idempotente: si la URL ya trae
+     * `shop_process_id=`, la devuelve sin cambios.
+     */
+    protected function appendShopProcessId(string $url, string $shopProcessId): string
+    {
+        if (str_contains($url, 'shop_process_id=')) {
+            return $url;
+        }
+
+        return $url.(str_contains($url, '?') ? '&' : '?').'shop_process_id='.urlencode($shopProcessId);
     }
 
     /**

@@ -161,6 +161,63 @@ class BancardVPOSServiceTest extends TestCase
         ]));
     }
 
+    public function test_append_shop_process_id_separador_correcto_y_no_duplica(): void
+    {
+        $s = $this->service();
+        $spid = '944529967052726';
+
+        // sin query → '?'
+        $this->assertSame(
+            'https://app.test/result?shop_process_id='.$spid,
+            $this->invokeProtected($s, 'appendShopProcessId', 'https://app.test/result', $spid)
+        );
+        // con query → '&'
+        $this->assertSame(
+            'https://app.test/result?x=1&shop_process_id='.$spid,
+            $this->invokeProtected($s, 'appendShopProcessId', 'https://app.test/result?x=1', $spid)
+        );
+        // ya presente → idempotente (no duplica)
+        $url = 'https://app.test/result?shop_process_id=OTRO';
+        $this->assertSame($url, $this->invokeProtected($s, 'appendShopProcessId', $url, $spid));
+    }
+
+    public function test_single_buy_agrega_shop_process_id_al_return_url_explicito(): void
+    {
+        // Bug (severidad alta): un returnUrl explícito no llevaba el shop_process_id
+        // (solo se agregaba en la rama default) → el retorno del browser no podía
+        // identificar la transacción. Ahora se agrega siempre.
+        config([
+            'bancard.persist_transactions' => false,
+            'bancard.frontend_url' => 'https://app.test',
+            'bancard.return_url' => '/result',
+            'bancard.cancel_url' => '/cancel',
+        ]);
+        Http::fake([
+            '*/vpos/api/0.3/single_buy' => Http::response(['status' => 'success', 'process_id' => 'PID123']),
+        ]);
+
+        $this->service()->createSingleBuy($this->payable(), returnUrl: 'https://mi.app/portal/resultado');
+
+        Http::assertSent(function ($request) {
+            $op = $request->data()['operation'];
+
+            return str_contains($op['return_url'], 'https://mi.app/portal/resultado')
+                && str_contains($op['return_url'], 'shop_process_id=');
+        });
+    }
+
+    public function test_charge_agrega_shop_process_id_al_return_url_explicito(): void
+    {
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => false]);
+        Http::fake([
+            '*/vpos/api/0.3/charge' => Http::response(['confirmation' => ['response' => 'S', 'response_code' => '00']]),
+        ]);
+
+        $this->service()->chargeWithToken($this->payable(), 'alias-xyz', 1, null, 'https://mi.app/portal/3ds');
+
+        Http::assertSent(fn ($request) => str_contains($request->data()['operation']['return_url'], 'shop_process_id='));
+    }
+
     public function test_charge_con_3ds_pendiente_devuelve_requires_3ds(): void
     {
         // Respuesta 3DS (spec pág. 40): todo null salvo confirmation.process_id.
