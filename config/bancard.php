@@ -62,6 +62,24 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | 3D Secure (opcional, por comercio)
+    |--------------------------------------------------------------------------
+    |
+    | Habilita el flujo 3DS en el charge (pago con token): cuando está activo, el
+    | request de charge envía extra_response_attributes=['confirmation.process_id']
+    | para que Bancard devuelva el process_id del desafío 3DS.
+    |
+    | IMPORTANTE: ese parámetro REQUIERE que Bancard tenga habilitado el producto
+    | 3DS para tu comercio. Enviarlo sin el permiso hace que Bancard RECHACE la
+    | operación (con riesgo en producción; reportado por Bancard en homologación).
+    | Por eso el default es false: activalo (BANCARD_ENABLE_3DS=true) solo cuando
+    | Bancard confirme el enrolamiento 3DS del comercio.
+    |
+    */
+    'enable_3ds' => env('BANCARD_ENABLE_3DS', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | Default Currency
     |--------------------------------------------------------------------------
     |

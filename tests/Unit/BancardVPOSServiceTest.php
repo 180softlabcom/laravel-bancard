@@ -100,11 +100,12 @@ class BancardVPOSServiceTest extends TestCase
         $this->assertArrayHasKey('response_details', $result);
     }
 
-    public function test_charge_request_envia_extra_response_attributes_para_3ds(): void
+    public function test_charge_no_envia_extra_response_attributes_sin_3ds(): void
     {
-        // Requisito de la spec (pág. 37, "Siempre enviar este dato"): sin esto Bancard
-        // no devuelve confirmation.process_id y el 3DS de charge queda roto.
-        config(['bancard.persist_transactions' => false]);
+        // Bancard reportó en homologación que extra_response_attributes REQUIERE el
+        // producto 3DS habilitado; enviarlo sin permiso hace que rechace la
+        // operación. Por eso es opt-in: con enable_3ds=false (default) NO se envía.
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => false]);
         Http::fake([
             '*/vpos/api/0.3/charge' => Http::response([
                 'confirmation' => ['response' => 'S', 'response_code' => '00'],
@@ -113,17 +114,29 @@ class BancardVPOSServiceTest extends TestCase
 
         $this->service()->chargeWithToken($this->payable(), 'alias-token-xyz');
 
-        Http::assertSent(function ($request) {
-            $body = $request->data();
+        Http::assertSent(fn ($request) => ! isset($request->data()['operation']['extra_response_attributes']));
+    }
 
-            return ($body['operation']['extra_response_attributes'] ?? null) === ['confirmation.process_id'];
-        });
+    public function test_charge_envia_extra_response_attributes_con_3ds_habilitado(): void
+    {
+        // Con enable_3ds=true (comercio enrolado en 3DS), la spec (pág. 37) pide
+        // enviar siempre extra_response_attributes para recibir confirmation.process_id.
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => true]);
+        Http::fake([
+            '*/vpos/api/0.3/charge' => Http::response([
+                'confirmation' => ['response' => 'S', 'response_code' => '00'],
+            ]),
+        ]);
+
+        $this->service()->chargeWithToken($this->payable(), 'alias-token-xyz');
+
+        Http::assertSent(fn ($request) => ($request->data()['operation']['extra_response_attributes'] ?? null) === ['confirmation.process_id']);
     }
 
     public function test_charge_con_3ds_pendiente_devuelve_requires_3ds(): void
     {
         // Respuesta 3DS (spec pág. 40): todo null salvo confirmation.process_id.
-        config(['bancard.persist_transactions' => false]);
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => true]);
         Http::fake([
             '*/vpos/api/0.3/charge' => Http::response([
                 'confirmation' => ['process_id' => 'i5fn*lx6niQel0QzWK1g'],

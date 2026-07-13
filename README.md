@@ -55,6 +55,7 @@ BANCARD_RETURN_URL=/payment/result
 BANCARD_CANCEL_URL=/payment/cancel
 BANCARD_PERSIST_TRANSACTIONS=true      # registra cada operación para idempotencia/conciliación
 BANCARD_CHECKOUT_SCRIPT_VERSION=4.0.0  # versión del SDK JS de checkout
+BANCARD_ENABLE_3DS=false               # 3DS en charge (opt-in): requiere que Bancard habilite el producto 3DS al comercio
 BANCARD_USER_MODEL="App\\Models\\User"
 ```
 
@@ -176,7 +177,7 @@ A diferencia del pago ocasional, el charge es una llamada servidor-a-servidor **
 
 La confirmación final llega al webhook `POST /webhooks/bancard/charge`.
 
-> El request de charge envía siempre `extra_response_attributes: ["confirmation.process_id"]` (requisito de la spec, pág. 37): es lo que hace que Bancard devuelva el `process_id` cuando la tarjeta exige 3DS. Sin ese atributo, un cobro 3DS se reportaría como rechazo.
+> **3DS opcional por comercio (`BANCARD_ENABLE_3DS`).** El request de charge envía `extra_response_attributes: ["confirmation.process_id"]` **solo si `BANCARD_ENABLE_3DS=true`**. Ese parámetro **requiere que Bancard tenga habilitado el producto 3DS** para tu comercio; enviarlo sin ese permiso hace que Bancard **rechace la operación** (con riesgo en producción). Activá el flag únicamente cuando Bancard confirme el enrolamiento 3DS. Con el flag en `false` (default), el charge funciona como pago directo sin 3DS.
 
 > 📱 **WebView / mobile:** igual que en el pago ocasional, el WebView debe usar `baseUrl: 'https://vpos.infonet.com.py'` para que el desafío 3DS renderice (spec pág. 75).
 
