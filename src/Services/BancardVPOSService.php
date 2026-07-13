@@ -608,8 +608,10 @@ class BancardVPOSService
             throw new BancardException('Invalid webhook payload: missing shop_process_id');
         }
 
-        // Validate token
-        if (!$this->validateWebhookToken($operation)) {
+        // Validate token — aceptamos ambas fórmulas (confirm/charge) porque Bancard
+        // usa una sola URL de confirmación para single_buy y charge (ver
+        // validateConfirmationToken).
+        if (!$this->validateConfirmationToken($operation)) {
             throw new BancardException('Invalid webhook token');
         }
 
@@ -635,16 +637,61 @@ class BancardVPOSService
     }
 
     /**
-     * Validate webhook token.
+     * Valida el token de una confirmación aceptando CUALQUIERA de las dos
+     * fórmulas: single_buy ("confirm") o charge/3DS ("charge" + alias_token).
+     *
+     * Bancard usa UNA sola "URL de confirmación" en el portal del comercio y por
+     * ahí llegan AMBOS tipos de callback (single_buy y charge). Si un endpoint
+     * valida una sola fórmula, el otro tipo se rechaza por "token inválido":
+     * p.ej. una confirmación de single_buy APROBADA que cae en el handler de
+     * charge se responde "rejected", el evento nunca se dispara y la orden queda
+     * impaga pese al cobro real (y Bancard puede revertirla). Aceptar ambas
+     * fórmulas hace el webhook robusto sin importar qué URL configure el portal.
+     */
+    public function validateConfirmationToken(array $operation): bool
+    {
+        if ($this->matchesConfirmToken($operation)) {
+            return true;
+        }
+
+        // Fórmula de charge/3DS: necesita el alias_token (viene en el payload del
+        // callback de charge; un single_buy no lo trae).
+        $aliasToken = $operation['alias_token'] ?? '';
+
+        return $aliasToken !== '' && $this->validateChargeWebhookToken($operation, $aliasToken);
+    }
+
+    /**
+     * Validate webhook token (fórmula single_buy "confirm").
+     *
+     * @deprecated Usar validateConfirmationToken(), que acepta ambas fórmulas
+     *             (confirm/charge) porque Bancard usa una sola URL de confirmación.
      */
     protected function validateWebhookToken(array $operation): bool
+    {
+        if ($this->matchesConfirmToken($operation)) {
+            return true;
+        }
+
+        Log::warning('Bancard webhook token validation failed', [
+            'shop_process_id' => (string) ($operation['shop_process_id'] ?? ''),
+            'received_token' => substr((string) ($operation['token'] ?? ''), 0, 10) . '...',
+        ]);
+
+        return false;
+    }
+
+    /**
+     * Comparación pura (sin logging) del token contra la fórmula single_buy
+     * "confirm": md5(private_key + shop_process_id + "confirm" + amount + currency).
+     */
+    protected function matchesConfirmToken(array $operation): bool
     {
         $receivedToken = $operation['token'] ?? '';
         $shopProcessId = (string) ($operation['shop_process_id'] ?? '');
         $amount = $operation['amount'] ?? '';
         $currency = $operation['currency'] ?? 'PYG';
 
-        // Formula for single_buy confirm
         $confirmToken = $this->generateToken([
             $this->privateKey,
             $shopProcessId,
@@ -653,19 +700,7 @@ class BancardVPOSService
             $currency,
         ]);
 
-        if ($receivedToken !== '' && hash_equals($confirmToken, $receivedToken)) {
-            return true;
-        }
-
-        // Formula for charge (token payment) - would need alias_token from order
-        // This is handled in the application layer
-
-        Log::warning('Bancard webhook token validation failed', [
-            'shop_process_id' => $shopProcessId,
-            'received_token' => substr($receivedToken, 0, 10) . '...',
-        ]);
-
-        return false;
+        return $receivedToken !== '' && hash_equals($confirmToken, $receivedToken);
     }
 
     /**

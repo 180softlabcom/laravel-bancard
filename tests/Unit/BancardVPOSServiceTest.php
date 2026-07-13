@@ -133,6 +133,34 @@ class BancardVPOSServiceTest extends TestCase
         Http::assertSent(fn ($request) => ($request->data()['operation']['extra_response_attributes'] ?? null) === ['confirmation.process_id']);
     }
 
+    public function test_validate_confirmation_token_acepta_confirm_y_charge(): void
+    {
+        // Bancard usa una sola URL de confirmación: el mismo endpoint puede recibir
+        // single_buy (fórmula "confirm") o charge/3DS (fórmula "charge" + alias).
+        $s = $this->service(); // private key = 'priv'
+        $shop = '944529967052726';
+        $amount = '950000.00';
+        $currency = 'PYG';
+
+        // single_buy → fórmula "confirm" (sin alias_token)
+        $confirm = md5('priv'.$shop.'confirm'.$amount.$currency);
+        $this->assertTrue($s->validateConfirmationToken([
+            'token' => $confirm, 'shop_process_id' => $shop, 'amount' => $amount, 'currency' => $currency,
+        ]));
+
+        // charge/3DS → fórmula "charge" + alias_token
+        $alias = 'alias-xyz';
+        $charge = md5('priv'.$shop.'charge'.$amount.$currency.$alias);
+        $this->assertTrue($s->validateConfirmationToken([
+            'token' => $charge, 'shop_process_id' => $shop, 'amount' => $amount, 'currency' => $currency, 'alias_token' => $alias,
+        ]));
+
+        // Token falso → false con ambas fórmulas
+        $this->assertFalse($s->validateConfirmationToken([
+            'token' => 'falsificado', 'shop_process_id' => $shop, 'amount' => $amount, 'currency' => $currency,
+        ]));
+    }
+
     public function test_charge_con_3ds_pendiente_devuelve_requires_3ds(): void
     {
         // Respuesta 3DS (spec pág. 40): todo null salvo confirmation.process_id.
