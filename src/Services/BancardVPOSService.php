@@ -784,8 +784,18 @@ class BancardVPOSService
     {
         // shop_process_id es la clave de idempotencia y del token de confirmación;
         // no admite colisiones. time().rand() colisiona bajo ráfaga, así que generamos
-        // un id numérico de 15 dígitos con entropía CSPRNG (6 de tiempo + 9 aleatorios).
-        return substr((string) time(), -6).str_pad((string) random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
+        // un id numérico de 15 dígitos con entropía CSPRNG.
+        //
+        // CRÍTICO: el primer dígito NO puede ser 0. Bancard devuelve el
+        // shop_process_id como NÚMERO JSON en el webhook de confirmación, lo que
+        // descarta el cero inicial ("053708855743773" → 53708855743773). Con el
+        // cero perdido, el token recalculado no coincide (Invalid token → un pago
+        // aprobado se rechaza, con riesgo de rollback) y falla el lookup de la
+        // transacción. Por eso el primer dígito es 1-9 (round-trip por número sin
+        // pérdida; 15 dígitos < 2^53, dentro del rango seguro de enteros JS/JSON).
+        return (string) random_int(1, 9)
+            .substr((string) time(), -5)
+            .str_pad((string) random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
     }
 
     /**
