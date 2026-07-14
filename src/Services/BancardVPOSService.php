@@ -199,7 +199,7 @@ class BancardVPOSService
 
             $confirmation = $responseData['confirmation'] ?? [];
 
-            $this->recordTransaction($payable, $shopProcessId, $confirmation['process_id'] ?? null, $amount, $currency, 'charge');
+            $this->recordTransaction($payable, $shopProcessId, $confirmation['process_id'] ?? null, $amount, $currency, 'charge', $aliasToken);
 
             // Check if 3DS is required
             if (isset($confirmation['process_id']) && !empty($confirmation['process_id']) && empty($confirmation['response'])) {
@@ -597,7 +597,7 @@ class BancardVPOSService
     /**
      * Process webhook callback from Bancard.
      */
-    public function processWebhook(array $payload): array
+    public function processWebhook(array $payload, ?string $aliasToken = null): array
     {
         $operation = $payload['operation'] ?? [];
 
@@ -612,9 +612,10 @@ class BancardVPOSService
         }
 
         // Validate token — aceptamos ambas fórmulas (confirm/charge) porque Bancard
-        // usa una sola URL de confirmación para single_buy y charge (ver
-        // validateConfirmationToken).
-        if (!$this->validateConfirmationToken($operation)) {
+        // usa una sola URL de confirmación para single_buy y charge. El $aliasToken
+        // (para la fórmula charge) lo provee el WebhookController desde la
+        // transacción guardada, ya que Bancard no lo manda en el payload.
+        if (!$this->validateConfirmationToken($operation, $aliasToken)) {
             throw new BancardException('Invalid webhook token');
         }
 
@@ -650,16 +651,20 @@ class BancardVPOSService
      * charge se responde "rejected", el evento nunca se dispara y la orden queda
      * impaga pese al cobro real (y Bancard puede revertirla). Aceptar ambas
      * fórmulas hace el webhook robusto sin importar qué URL configure el portal.
+     *
+     * El $aliasToken del callback de charge NO viene en el payload (Bancard no lo
+     * envía), así que el caller (WebhookController) lo recupera de la transacción
+     * registrada al cobrar y lo pasa acá. Si no se provee, se intenta con el del
+     * payload (por compatibilidad).
      */
-    public function validateConfirmationToken(array $operation): bool
+    public function validateConfirmationToken(array $operation, ?string $aliasToken = null): bool
     {
         if ($this->matchesConfirmToken($operation)) {
             return true;
         }
 
-        // Fórmula de charge/3DS: necesita el alias_token (viene en el payload del
-        // callback de charge; un single_buy no lo trae).
-        $aliasToken = $operation['alias_token'] ?? '';
+        // Fórmula de charge/3DS: necesita el alias_token con el que se firmó.
+        $aliasToken = $aliasToken ?? ($operation['alias_token'] ?? '');
 
         return $aliasToken !== '' && $this->validateChargeWebhookToken($operation, $aliasToken);
     }
@@ -738,7 +743,7 @@ class BancardVPOSService
      * Registra la operación localmente (idempotencia + conciliación) e invoca el
      * hook storeBancardPayment() del Payable. Best-effort: nunca bloquea el pago.
      */
-    protected function recordTransaction(Payable $payable, string $shopProcessId, ?string $processId, string $amount, string $currency, string $type): void
+    protected function recordTransaction(Payable $payable, string $shopProcessId, ?string $processId, string $amount, string $currency, string $type, ?string $aliasToken = null): void
     {
         if (config('bancard.persist_transactions', true)) {
             try {
@@ -750,6 +755,9 @@ class BancardVPOSService
                         'status' => 'pending',
                         'amount' => $amount,
                         'currency' => $currency,
+                        // Guardado para validar el token del webhook de charge (que se
+                        // firma con el alias_token y no viene en el payload del callback).
+                        'alias_token' => $aliasToken,
                         'payable_type' => $payable::class,
                         'payable_id' => (string) $payable->getPayableId(),
                     ]

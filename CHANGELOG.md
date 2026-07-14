@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.6] - 2026-07-14
+
+### Fixed
+- **`shop_process_id` con cero inicial → confirmación rechazada (crítico, financiero, intermitente ~1/10).** `generateShopProcessId()` usaba `substr(time(), -6)` como prefijo, que empieza con `0` ~10% de las veces. Bancard devuelve el `shop_process_id` como **número JSON** en el webhook (`"053708855743773"` → `53708855743773`, pierde el cero). Con el cero perdido, el token recalculado no coincide (`Invalid token` → un pago **aprobado** se rechaza, con riesgo de rollback) y falla el lookup de la transacción. Ahora el primer dígito es **1-9** (round-trip por número sin pérdida; 15 dígitos < 2^53). Afecta single_buy y charge.
+- **Webhook de charge: token no validaba porque falta el `alias_token` en el payload (crítico).** El token de confirmación de un charge se firma con el `alias_token`, que Bancard **no envía** en el callback, así que `handleChargeWithToken` validaba con `''` → siempre rechazaba (pago aprobado sin evento, orden impaga). Ahora el paquete **persiste el `alias_token`** al cobrar (nueva columna `bancard_transactions.alias_token`) y lo **recupera por `shop_process_id`** en el webhook para validar. Aplica a ambas rutas (`/payment` y `/charge`).
+
+### Migración
+- **Nueva migración** `add_alias_token_to_bancard_transactions_table`. Corré `php artisan migrate` al actualizar. El webhook de charge **requiere `persist_transactions=true`** (default) para poder guardar/recuperar el `alias_token`; sin persistencia no puede validar el token de charge.
+
 ## [1.2.5] - 2026-07-13
 
 ### Fixed

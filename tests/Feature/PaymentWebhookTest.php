@@ -6,6 +6,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
+use Softlab180\Bancard\Models\BancardTransaction;
 use Softlab180\Bancard\Tests\TestCase;
 
 /**
@@ -124,5 +125,55 @@ class PaymentWebhookTest extends TestCase
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class);
+    }
+
+    public function test_charge_valida_con_alias_token_guardado_cuando_no_viene_en_el_payload(): void
+    {
+        // Caso real de homologación: el token del webhook de charge se firma con el
+        // alias_token, que Bancard NO manda en el payload. El paquete lo recupera de
+        // la transacción registrada al cobrar y valida con ese.
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        $alias = 'alias-guardado-en-la-tx';
+        BancardTransaction::create([
+            'shop_process_id' => $this->shop,
+            'type' => 'charge',
+            'status' => 'pending',
+            'amount' => $this->amount,
+            'currency' => $this->currency,
+            'alias_token' => $alias,
+        ]);
+
+        $chargeToken = md5($this->priv.$this->shop.'charge'.$this->amount.$this->currency.$alias);
+        // NB: SIN alias_token en el payload (Bancard no lo envía).
+        $payload = $this->payload('00', 'S', token: $chargeToken);
+
+        $res = $this->postJson('/webhooks/bancard/charge', $payload);
+
+        $res->assertOk()->assertJson(['status' => 'success']);
+        Event::assertDispatched(PaymentSucceeded::class);
+    }
+
+    public function test_charge_con_alias_token_guardado_incorrecto_se_rechaza(): void
+    {
+        // El token se firmó con un alias distinto al guardado → no debe validar.
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        BancardTransaction::create([
+            'shop_process_id' => $this->shop,
+            'type' => 'charge',
+            'status' => 'pending',
+            'amount' => $this->amount,
+            'currency' => $this->currency,
+            'alias_token' => 'alias-correcto',
+        ]);
+
+        $chargeToken = md5($this->priv.$this->shop.'charge'.$this->amount.$this->currency.'alias-DISTINTO');
+        $payload = $this->payload('00', 'S', token: $chargeToken);
+
+        $res = $this->postJson('/webhooks/bancard/charge', $payload);
+
+        $res->assertOk()->assertJson(['status' => 'rejected']);
+        Event::assertNotDispatched(PaymentSucceeded::class);
     }
 }
