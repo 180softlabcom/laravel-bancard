@@ -41,7 +41,7 @@ php artisan vendor:publish --tag=bancard-migrations   # opcional (ya se cargan a
 php artisan migrate
 ```
 
-> **Importante:** desde la v1.1.0 hay una tabla nueva, `bancard_transactions` (idempotencia + conciliación). Corré `php artisan migrate` al actualizar. Si no querés persistencia, seteá `BANCARD_PERSIST_TRANSACTIONS=false`.
+> **Importante:** desde la v1.1.0 hay una tabla nueva, `bancard_transactions` (idempotencia + conciliación), y la **v1.2.6** le agrega la columna `alias_token` (necesaria para validar el webhook de charge). Corré `php artisan migrate` al actualizar. Si no querés persistencia, seteá `BANCARD_PERSIST_TRANSACTIONS=false` — pero tené en cuenta que **el webhook de charge (pago con token) requiere `persist_transactions=true`** para poder guardar/recuperar el `alias_token` con el que valida el token.
 
 ## Configuración
 

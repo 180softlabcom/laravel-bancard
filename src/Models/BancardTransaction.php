@@ -23,6 +23,7 @@ class BancardTransaction extends Model
         'status',
         'amount',
         'currency',
+        'alias_token',
         'payable_type',
         'payable_id',
         'authorization_number',
@@ -34,6 +35,11 @@ class BancardTransaction extends Model
     protected $casts = [
         'last_payload' => 'array',
         'processed_at' => 'datetime',
+    ];
+
+    // Se usa para validar el token del webhook de charge; no se expone al serializar.
+    protected $hidden = [
+        'alias_token',
     ];
 
     public function payable(): MorphTo

@@ -26,7 +26,13 @@ class WebhookController extends Controller
         $this->logReceived('Bancard payment webhook received', $payload);
 
         try {
-            $result = Bancard::processWebhook($payload);
+            // Bancard usa una sola URL de confirmación: por /payment también puede
+            // llegar un charge, cuyo token se firma con el alias_token (que Bancard
+            // NO manda en el payload). Lo recuperamos de la transacción guardada.
+            $operation = $payload['operation'] ?? [];
+            $aliasToken = $operation['alias_token'] ?? $this->lookupAliasToken((string) ($operation['shop_process_id'] ?? ''));
+
+            $result = Bancard::processWebhook($payload, $aliasToken);
 
             // Idempotencia: si este shop_process_id ya fue procesado (callback
             // reenviado por vPOS), acusar 200 sin volver a despachar el evento.
@@ -153,10 +159,13 @@ class WebhookController extends Controller
 
             // Aceptamos AMBAS fórmulas (confirm/charge): Bancard usa una sola "URL de
             // confirmación" en el portal, así que por /charge puede llegar tanto un
-            // charge/3DS como un single_buy. Validar solo la fórmula "charge"
-            // rechazaba el single_buy (token "confirm", sin alias_token) → un pago
-            // aprobado quedaba como "rejected", sin evento y con la orden impaga.
-            if (! Bancard::validateConfirmationToken($operation)) {
+            // charge/3DS como un single_buy. La fórmula "charge" se firma con el
+            // alias_token, que Bancard NO manda en el payload: lo recuperamos de la
+            // transacción guardada al cobrar (por eso el charge necesita
+            // persist_transactions=true para validar su webhook).
+            $aliasToken = $operation['alias_token'] ?? $this->lookupAliasToken((string) ($operation['shop_process_id'] ?? ''));
+
+            if (! Bancard::validateConfirmationToken($operation, $aliasToken)) {
                 // Token inválido con ambas fórmulas: no es un callback genuino.
                 // Logueamos y acusamos 200 (un no-200 podría hacer perder un callback
                 // legítimo por misconfig).
@@ -210,6 +219,25 @@ class WebhookController extends Controller
             Log::info($label, ['payload' => $payload]);
         } else {
             Log::info($label, ['shop_process_id' => $payload['operation']['shop_process_id'] ?? null]);
+        }
+    }
+
+    /**
+     * Recupera el alias_token de la transacción registrada al cobrar (charge). El
+     * token del webhook de charge se firma con el alias_token, que Bancard NO manda
+     * en el payload; sin persistencia no se puede validar (devuelve null → el charge
+     * cae en la rama de token inválido). Un single_buy no tiene alias (devuelve null).
+     */
+    protected function lookupAliasToken(string $shopProcessId): ?string
+    {
+        if ($shopProcessId === '' || ! config('bancard.persist_transactions', true)) {
+            return null;
+        }
+
+        try {
+            return BancardTransaction::where('shop_process_id', $shopProcessId)->value('alias_token');
+        } catch (\Throwable $e) {
+            return null;
         }
     }
 
