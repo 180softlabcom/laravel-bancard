@@ -245,6 +245,8 @@ Con `persist_transactions` activo (default), el paquete registra cada operación
 - **Deduplicar** callbacks reenviados por vPOS (el webhook hace un *claim* atómico y no re-dispara el evento).
 - **Conciliar** pagos perdidos: si no llegó el webhook, consultá `getPaymentConfirmation()` (vPOS recomienda esperar ~10 min) o `rollbackPayment()`.
 
+> **`getPaymentConfirmation()` sirve para single_buy Y para charge (pago con token).** Bancard lo define como *operación común a ambos flujos* (`POST /single_buy/confirmations`, spec pág. 44 y 55) y **no existe un endpoint de confirmación específico para charge**. Si al conciliar un charge te da `BuyNotFound`, la causa casi siempre es un `shop_process_id` con **cero inicial** (Bancard lo devuelve como número y pierde el cero) — corregido en v1.2.6 (`generateShopProcessId()` nunca empieza con 0). No reenrutes la conciliación de charges a otro endpoint: no lo hay.
+
 ## Webhooks
 
 Rutas registradas automáticamente (prefijo configurable con `bancard.webhook.route_prefix`):
