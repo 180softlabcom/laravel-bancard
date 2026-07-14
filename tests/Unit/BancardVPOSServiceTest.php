@@ -57,19 +57,23 @@ class BancardVPOSServiceTest extends TestCase
         );
     }
 
-    public function test_shop_process_id_es_numerico_de_15_digitos_y_no_colisiona(): void
+    public function test_shop_process_id_es_numerico_de_15_digitos_sin_cero_inicial_y_no_colisiona(): void
     {
         $s = $this->service();
         $ids = [];
-        for ($i = 0; $i < 2000; $i++) {
+        for ($i = 0; $i < 5000; $i++) {
             $ids[] = $this->invokeProtected($s, 'generateShopProcessId');
         }
 
         // El generador viejo (time().rand(10000,99999)) colisionaba decenas de veces
         // en este volumen; el nuevo (15 dígitos CSPRNG) debe ser único.
-        $this->assertCount(2000, array_unique($ids), 'shop_process_id colisionó');
-        foreach (array_slice($ids, 0, 50) as $id) {
-            $this->assertMatchesRegularExpression('/^\d{15}$/', $id);
+        $this->assertCount(5000, array_unique($ids), 'shop_process_id colisionó');
+
+        // CRÍTICO: nunca empieza con 0. Bancard numeriza el shop_process_id en el
+        // webhook (pierde el cero inicial) → token/lookup romperían. El generador
+        // viejo (substr(time(),-6)) producía ceros iniciales ~10% de las veces.
+        foreach ($ids as $id) {
+            $this->assertMatchesRegularExpression('/^[1-9]\d{14}$/', $id);
         }
     }
 
