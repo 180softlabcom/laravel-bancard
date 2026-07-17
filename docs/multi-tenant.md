@@ -116,6 +116,19 @@ payload → shop_process_id
 llaves del comercio. La validación (`validateConfirmationToken`) no cambia — cambia **qué
 instancia** la ejecuta.
 
+**Robustez (obligatorio en 1a):**
+
+- **Cero residuo del singleton.** TODAS las llamadas del path del webhook
+  (`processWebhook`/`validateConfirmationToken`/`getPaymentConfirmation`/`lookupAliasToken`)
+  corren sobre la instancia `forContext($ctx)` — **nunca** `Bancard::` ni `app('bancard')`. El
+  **E2E con llaves ≠ global lo prueba de raíz**: si algún path cayera al singleton global,
+  validaría con la llave equivocada y el test fallaría. (Opcional: chequeo estático de que el
+  controller del webhook no referencia el Facade/singleton.)
+- **Fail-safe ante fallo del resolver.** Si `resolveByShopProcessId` **lanza** (p.ej. DB caída),
+  envolver → **HTTP 200 + no procesar + log/alerta**, nunca 500. vPOS no reintenta confiable y
+  un no-200 le hace dar la confirmación por perdida; la reconciliación (callback del browser /
+  polling) la recupera autoritativamente. (`null` del resolver ya es 200 sin procesar.)
+
 ### R2b — Default no-breaking
 
 Si `bancard.tenant_resolver` es `null`, el paquete usa un `GlobalTenantResolver` interno
@@ -132,17 +145,26 @@ globales** de config. → **single-tenant queda idéntico a hoy**; multi-tenant 
 - Consumidor sin idempotencia propia: deja el dedup del paquete (`claimTransaction`, requiere
   persist) activo.
 
+> **Nota de migración (Front 2):** con `persist_transactions=false`, el guard de idempotencia de
+> la fila de negocio del consumidor (hoy suele vivir en el callback del browser) debe **moverse
+> al listener** — pasa a ser el único dedup de esa fila. El criterio de aceptación testea
+> "replay se deduplica".
+
 ### R4 — Eventos con payload suficiente
 
 `PaymentSucceeded`/`PaymentFailed` ya cargan `shop_process_id`, `is_paid`,
 `authorization_number`, `ticket_number`, `response_code`, `response_description`,
-`extended_response_description`, `amount`, `currency` y la confirmación cruda. **Se agrega
-`tenantRef`** (hoy falta). Campo nuevo opcional al final → no-breaking.
+`extended_response_description`, `amount`, `currency`. **Se agrega `tenantRef`** (hoy falta) —
+campo nuevo opcional al final → no-breaking.
 
-> **Marca / últimos-4:** la confirmación de Bancard trae `security_information` (card_source,
-> card_country), **no** brand/last-4 de forma confiable. El **listener** los enriquece desde
-> el registro de tarjeta del consumidor (que tiene, porque inició el charge). No es gap del
-> paquete.
+> **La confirmación CRUDA, verbatim (importante).** El evento debe cargar el `operation`
+> **completo** de Bancard, no solo el subconjunto que hoy arma `processWebhook`. Motivo: en
+> **single_buy** (tarjeta nueva en el iframe) Bancard manda `card_masked_number`/`card_brand` en
+> la confirmación, y hoy el `processWebhook` estructurado **los descarta** → se perdería el
+> display (marca/últimos-4). El listener los lee de la confirmación cruda. En **charge** el
+> consumidor ya los tiene (inició el cobro). `security_information` (card_source, card_country)
+> sí está; brand/últimos-4 salen del `operation` crudo → **verificar contra los campos reales
+> del single_buy**.
 
 ### R5 — Charge seguro sin forzar persistencia (modo re-query, opt-in)
 
@@ -158,12 +180,22 @@ globales** de config. → **single-tenant queda idéntico a hoy**; multi-tenant 
 `'requery'` **no reemplaza** al resolver (la re-consulta igual firma con la llave del comercio
 resuelto); resuelve el **acople** de R3 para charge.
 
+> **Acuse de 30s (obligatorio en modo requery).** La re-query corre **dentro** del request del
+> webhook, y Bancard exige acusar en **<30s** o da la confirmación por perdida. Por eso: timeout
+> **corto** y configurable, muy por debajo de 30s (p.ej. 8s), y **fail-safe** — si la re-query
+> tarda o falla → **200 + orden pending** (se reconcilia por el callback del browser / polling).
+> **Nunca** bloquear el ack por la re-query. Es la razón por la que el default es `'token'`
+> (síncrono, sin llamada HTTP saliente).
+
 ### R6 — Catastro por pull autenticado, per-tenant (Front 1b)
 
 Convergencia vía `syncBancardCards()` (que usa `getUserCards` autenticado) bajo el tenant,
 disparado por el consumidor al recibir `add_new_card_success` del iframe. Requiere:
 
-- `SavedCard` gana `tenant_ref` (columna nullable → scoping per-comercio de la tarjeta).
+- `SavedCard` gana scoping per-comercio en una **columna configurable**
+  (`bancard.saved_cards_tenant_column`, default `tenant_ref`) → un consumidor que ya extendió
+  `bancard_saved_cards` con su propia columna (p.ej. `commerce_id`) la **reutiliza** en vez de
+  duplicar el concepto.
 - El trait `HasBancardCards` acepta un **context explícito** (consumer-initiated → sin
   resolver-callback).
 - El modelo de usuario/morph sigue siendo del consumidor (`syncBancardCards` ya usa
@@ -194,6 +226,15 @@ a la **misma** ruta; el resolver desambigua por `shop_process_id`, que desde **v
 **1a es prerrequisito de la migración del consumidor (Front 2).** Faseando, un consumidor
 puede **borrar su webhook de pago y cerrar el fraude apenas salga 1a**, sin esperar 1b/1c.
 
+**Prerrequisito del consumidor: estar en ≥v1.2.6 antes de converger.** El resolver desambigua
+por `shop_process_id`; su **unicidad cross-tenant** la garantiza el generador **CSPRNG de
+v1.2.6** (R8). Con el generador viejo (`rand()`, 5 dígitos) hay riesgo bajo-pero-real de
+**colisión cross-tenant** (dos comercios con el mismo `shop_process_id` → el resolver podría
+resolver el comercio equivocado y rechazar un callback legítimo). Orden correcto: **upgrade a
+v1.2.6 → mergear 1a → recién ahí borrar el webhook casero.** La ventana de ids viejos drena sola
+a medida que esas órdenes se completan. (El fix del generador, que al principio parecía "no
+sirve", resulta **prerrequisito** de la convergencia multi-tenant.)
+
 ## 6. Cambios de código (1a)
 
 - `src/Contracts/BancardTenantResolver.php` — interface (nuevo).
@@ -203,7 +244,8 @@ puede **borrar su webhook de pago y cerrar el fraude apenas salga 1a**, sin espe
 - `Http/Controllers/WebhookController.php` — resuelve el service por-request desde el resolver;
   **no** toca el Facade singleton; despacha con `tenantRef`.
 - `Events/PaymentSucceeded`, `PaymentFailed` — `tenantRef` nullable al final.
-- `config/bancard.php` — `tenant_resolver` (default `null`), `webhook_verification` (default `'token'`).
+- `config/bancard.php` — `tenant_resolver` (default `null`), `webhook_verification` (default
+  `'token'`), `webhook_requery_timeout` (segundos, default 8, para el modo `requery`).
 - Tests — E2E multi-tenant con comercio A (llaves ≠ global): single_buy y charge validan y
   disparan el evento; callback forjado se rechaza; `shop_process_id` desconocido → 200 sin
   procesar; y regresión single-tenant (sin resolver) idéntica.
