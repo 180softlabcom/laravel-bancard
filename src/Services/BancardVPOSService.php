@@ -32,6 +32,17 @@ class BancardVPOSService
             ?? 'https://vpos.infonet.com.py:8888/checkout';
     }
 
+    /**
+     * Construye una instancia con las llaves de un comercio resuelto (multi-tenant).
+     *
+     * El webhook usa ESTA vía —no el singleton global del container— para validar el
+     * token/consultar la confirmación con la llave del comercio dueño del callback.
+     */
+    public static function forContext(\Softlab180\Bancard\Tenancy\BancardTenantContext $context): self
+    {
+        return new self($context->publicKey, $context->privateKey, $context->environment);
+    }
+
     /*
     |--------------------------------------------------------------------------
     | SINGLE BUY (Pago Ocasional)
@@ -467,8 +478,12 @@ class BancardVPOSService
 
     /**
      * Get payment confirmation status.
+     *
+     * Sirve para single_buy Y charge (operación común, spec pág. 44/55). El $timeout
+     * (segundos) permite acotar la espera cuando se usa como verificación DENTRO del
+     * webhook (modo 'requery'), que debe acusar en <30s; default 30s para uso normal.
      */
-    public function getPaymentConfirmation(string $shopProcessId): array
+    public function getPaymentConfirmation(string $shopProcessId, ?int $timeout = null): array
     {
         $token = $this->generateToken([
             $this->privateKey,
@@ -487,7 +502,7 @@ class BancardVPOSService
         $this->logRequest('single_buy/confirmations', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = Http::timeout($timeout ?? 30)
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy/confirmations', $requestData);
 
             $responseData = $response->json();
@@ -695,6 +710,13 @@ class BancardVPOSService
      */
     protected function matchesConfirmToken(array $operation): bool
     {
+        // Fail-closed: sin secreto no se puede autenticar. Sin este guard, una private
+        // key vacía (comercio mal configurado, o env sin setear → (string) null = '')
+        // haría el token forjable con datos públicos (md5(''+shop_process_id+...)).
+        if ($this->privateKey === '') {
+            return false;
+        }
+
         $receivedToken = $operation['token'] ?? '';
         $shopProcessId = (string) ($operation['shop_process_id'] ?? '');
         $amount = $operation['amount'] ?? '';
@@ -716,6 +738,11 @@ class BancardVPOSService
      */
     public function validateChargeWebhookToken(array $operation, string $aliasToken): bool
     {
+        // Fail-closed: sin secreto no se puede autenticar (ver matchesConfirmToken).
+        if ($this->privateKey === '') {
+            return false;
+        }
+
         $receivedToken = $operation['token'] ?? '';
         $shopProcessId = (string) ($operation['shop_process_id'] ?? '');
         $amount = $operation['amount'] ?? '';

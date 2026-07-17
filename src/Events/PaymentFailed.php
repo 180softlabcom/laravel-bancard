@@ -15,6 +15,9 @@ class PaymentFailed
         public readonly array $response,
         public readonly ?string $errorCode = null,
         public readonly ?string $errorMessage = null,
+        // Referencia del comercio (multi-tenant): el listener sabe a qué tenant pertenece.
+        // Null en single-tenant. Se propaga desde el BancardTenantContext resuelto.
+        public readonly mixed $tenantRef = null,
     ) {}
 
     /**

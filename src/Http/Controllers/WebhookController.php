@@ -10,70 +10,125 @@ use Softlab180\Bancard\Events\CardRegistered;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
 use Softlab180\Bancard\Exceptions\BancardException;
-use Softlab180\Bancard\Facades\Bancard;
+use Softlab180\Bancard\Exceptions\ConfirmationUnavailableException;
 use Softlab180\Bancard\Models\BancardTransaction;
 use Softlab180\Bancard\Models\SavedCard;
+use Softlab180\Bancard\Services\BancardVPOSService;
+use Softlab180\Bancard\Tenancy\BancardTenantContext;
+use Softlab180\Bancard\Tenancy\BancardTenantResolver;
+use Softlab180\Bancard\Tenancy\GlobalTenantResolver;
 
 class WebhookController extends Controller
 {
     /**
-     * Handle Bancard webhook for payment confirmation (Single Buy).
+     * Confirmación de pago (Single Buy). Bancard usa UNA sola "URL de confirmación",
+     * así que por acá también puede llegar un charge; ambas rutas comparten handler.
      */
     public function handlePayment(Request $request): JsonResponse
     {
+        return $this->handleConfirmation($request, 'Bancard payment webhook received');
+    }
+
+    /**
+     * Confirmación de pago con token (charge / 3DS). Mismo handler que /payment:
+     * el tenant se resuelve por shop_process_id y la fórmula (confirm/charge) se
+     * acepta indistintamente.
+     */
+    public function handleChargeWithToken(Request $request): JsonResponse
+    {
+        return $this->handleConfirmation($request, 'Bancard charge with token webhook received');
+    }
+
+    /**
+     * Handler común de confirmación (single_buy + charge), multi-tenant.
+     *
+     * Flujo: resolver el comercio dueño del shop_process_id → construir un service
+     * PER-TENANT con SUS llaves (nunca el singleton global) → verificar el callback
+     * (token o re-query) con esa instancia → idempotencia → despachar el evento con
+     * el tenantRef. Fail-safe: cualquier duda (tenant no resuelto, re-query caída) se
+     * acusa 200 sin procesar y se deja para reconciliar; nunca 500 por esos casos.
+     */
+    protected function handleConfirmation(Request $request, string $logLabel): JsonResponse
+    {
         $payload = $request->all();
 
-        $this->logReceived('Bancard payment webhook received', $payload);
+        $this->logReceived($logLabel, $payload);
 
         try {
-            // Bancard usa una sola URL de confirmación: por /payment también puede
-            // llegar un charge, cuyo token se firma con el alias_token (que Bancard
-            // NO manda en el payload). Lo recuperamos de la transacción guardada.
             $operation = $payload['operation'] ?? [];
-            $aliasToken = $operation['alias_token'] ?? $this->lookupAliasToken((string) ($operation['shop_process_id'] ?? ''));
+            $shopProcessId = (string) ($operation['shop_process_id'] ?? '');
 
-            $result = Bancard::processWebhook($payload, $aliasToken);
+            // Resolver el tenant. Fail-safe: null (desconocido) o excepción (DB caída)
+            // → 200 sin procesar; vPOS no reintenta confiable y un no-200 le hace dar
+            // la confirmación por perdida; la reconciliación la recupera.
+            $context = $this->resolveTenant($shopProcessId);
 
-            // Idempotencia: si este shop_process_id ya fue procesado (callback
-            // reenviado por vPOS), acusar 200 sin volver a despachar el evento.
-            if (! $this->claimTransaction((string) ($result['shop_process_id'] ?? ''), (bool) ($result['is_paid'] ?? false), $result)) {
+            if ($context === null) {
+                return response()->json(['status' => 'success', 'unresolved' => true]);
+            }
+
+            // Instancia PER-TENANT: valida el token / consulta con la llave del comercio.
+            $service = BancardVPOSService::forContext($context);
+
+            try {
+                [$isPaid, $confirmation] = $this->verifyConfirmation($service, $payload, $operation, $shopProcessId);
+            } catch (BancardException $e) {
+                // Token inválido (ambas fórmulas): no es un callback genuino. 200 rejected.
+                Log::warning('Bancard webhook rejected (invalid token)', [
+                    'shop_process_id' => $shopProcessId,
+                    'error' => $e->getMessage(),
+                ]);
+
+                return response()->json(['status' => 'rejected'], 200);
+            } catch (ConfirmationUnavailableException $e) {
+                // Modo requery: Bancard no disponible/timeout → 200 + pending, sin evento.
+                Log::warning('Bancard webhook: re-query no disponible; se deja pending', [
+                    'shop_process_id' => $shopProcessId,
+                    'error' => $e->getMessage(),
+                ]);
+
+                return response()->json(['status' => 'success', 'pending' => true]);
+            }
+
+            // Idempotencia: un callback reenviado por vPOS se acusa 200 sin re-despachar.
+            if (! $this->claimTransaction($shopProcessId, $isPaid, $confirmation)) {
                 return response()->json(['status' => 'success', 'duplicate' => true]);
             }
 
-            // processWebhook() devuelve un array PLANO con 'is_paid' (bool) y los
-            // campos en la raíz; NO trae 'status' ni 'operation'.
-            if ($result['is_paid'] ?? false) {
-                PaymentSucceeded::dispatch(
-                    shopProcessId: (string) ($result['shop_process_id'] ?? ''),
-                    response: ['confirmation' => $result],
-                    authorizationNumber: $result['authorization_number'] ?? null,
-                    ticketNumber: $result['ticket_number'] ?? null,
-                );
-            } else {
-                PaymentFailed::dispatch(
-                    shopProcessId: (string) ($result['shop_process_id'] ?? ''),
-                    response: ['confirmation' => $result],
-                    errorCode: $result['response_code'] ?? null,
-                    errorMessage: $result['extended_response_description'] ?? $result['response_description'] ?? null,
-                );
+            // El evento ya quedó reclamado (idempotencia): un listener SÍNCRONO que lanza
+            // NO debe convertir esto en 500, porque perdería el ack (vPOS no reintenta) y
+            // la re-entrega caería en 'duplicate' → el evento nunca se re-despacharía. Se
+            // loguea y se acusa 200; la robustez del listener (idealmente encolado e
+            // idempotente) es responsabilidad del consumidor.
+            try {
+                if ($isPaid) {
+                    PaymentSucceeded::dispatch(
+                        shopProcessId: $shopProcessId,
+                        response: ['confirmation' => $confirmation],
+                        authorizationNumber: $confirmation['authorization_number'] ?? null,
+                        ticketNumber: $confirmation['ticket_number'] ?? null,
+                        tenantRef: $context->tenantRef,
+                    );
+                } else {
+                    PaymentFailed::dispatch(
+                        shopProcessId: $shopProcessId,
+                        response: ['confirmation' => $confirmation],
+                        errorCode: $confirmation['response_code'] ?? null,
+                        errorMessage: $confirmation['extended_response_description'] ?? $confirmation['response_description'] ?? null,
+                        tenantRef: $context->tenantRef,
+                    );
+                }
+            } catch (\Throwable $e) {
+                Log::error('Bancard webhook: un listener falló tras despachar el evento', [
+                    'shop_process_id' => $shopProcessId,
+                    'error' => $e->getMessage(),
+                ]);
             }
 
-            // Bancard exige HTTP 200 para acusar recibo. vPOS no reintenta de forma
-            // confiable: un no-200 hace que dé la confirmación por perdida. Tanto un pago
-            // aprobado como uno rechazado son resultados de negocio válidos que ya quedaron
-            // registrados vía evento, así que ambos se acusan con 200.
+            // vPOS exige HTTP 200 (aprobado o rechazado son resultados de negocio válidos).
             return response()->json(['status' => 'success']);
-        } catch (BancardException $e) {
-            // Token/payload inválido (posible spoof o mala configuración): no es un
-            // callback genuino de Bancard, así que no despachamos ningún evento.
-            Log::warning('Bancard payment webhook rejected (invalid token/payload)', [
-                'error' => $e->getMessage(),
-                'payload' => $payload,
-            ]);
-
-            return response()->json(['status' => 'rejected'], 200);
         } catch (\Throwable $e) {
-            // Error genuino del servidor: 500 para que se investigue.
+            // Error genuinamente inesperado: 500 para que se investigue.
             Log::error('Bancard webhook processing failed', [
                 'error' => $e->getMessage(),
                 'payload' => $payload,
@@ -84,7 +139,98 @@ class WebhookController extends Controller
     }
 
     /**
+     * Verifica que la confirmación es genuina y devuelve [is_paid, confirmación cruda].
+     *
+     * - Modo 'token' (default): valida la firma MD5 (fórmula confirm o charge) con la
+     *   instancia PER-TENANT. Devuelve el `operation` CRUDO como confirmación (así el
+     *   listener conserva campos como card_masked_number/card_brand del single_buy, que
+     *   el parseo estructurado descartaría). Lanza BancardException si el token no valida.
+     * - Modo 'requery': ignora el payload y re-consulta el estado autoritativo a Bancard
+     *   (`getPaymentConfirmation`) bajo el tenant, con timeout corto. Zero-trust sobre el
+     *   estado, no solo sobre la firma. Lanza ConfirmationUnavailableException si la
+     *   consulta falla/timeoutea (→ el webhook acusa 200 + pending).
+     *
+     * @return array{0: bool, 1: array<string,mixed>}
+     */
+    protected function verifyConfirmation(BancardVPOSService $service, array $payload, array $operation, string $shopProcessId): array
+    {
+        if (config('bancard.webhook_verification', 'token') === 'requery') {
+            // Timeout acotado: la re-query corre DENTRO del ack de <30s. Un 0/negativo
+            // sería Http::timeout(0) = espera INDEFINIDA en Guzzle; lo forzamos positivo
+            // y por debajo de 30s.
+            $timeout = (int) config('bancard.webhook_requery_timeout', 8);
+            $timeout = $timeout > 0 ? min($timeout, 25) : 8;
+
+            $result = $service->getPaymentConfirmation($shopProcessId, $timeout);
+
+            if (! ($result['success'] ?? false)) {
+                throw new ConfirmationUnavailableException((string) ($result['error'] ?? 'Confirmation re-query unavailable'));
+            }
+
+            return [(bool) ($result['is_paid'] ?? false), $result['confirmation'] ?? []];
+        }
+
+        // Modo token: processWebhook valida con la instancia PER-TENANT y normaliza. Le
+        // mergeamos el operation CRUDO para conservar campos que el parseo estructurado
+        // descarta (p.ej. card_masked_number/card_brand del single_buy); el normalizado
+        // gana (is_paid, additional_data decodificado, security_information, etc.), así el
+        // evento mantiene su forma histórica para listeners single-tenant existentes.
+        // El alias_token del charge no viaja en el payload: se recupera de la transacción.
+        $aliasToken = $operation['alias_token'] ?? $this->lookupAliasToken($shopProcessId);
+
+        $normalized = $service->processWebhook($payload, $aliasToken);
+
+        return [(bool) ($normalized['is_paid'] ?? false), array_merge($operation, $normalized)];
+    }
+
+    /**
+     * Resuelve el comercio dueño del shop_process_id vía el resolver configurado.
+     * Fail-safe: si el resolver lanza (p.ej. DB caída) → null (→ el webhook acusa 200
+     * sin procesar y no despacha evento); nunca propaga un 500 por esto.
+     */
+    protected function resolveTenant(string $shopProcessId): ?BancardTenantContext
+    {
+        if ($shopProcessId === '') {
+            return null;
+        }
+
+        try {
+            return $this->tenantResolver()->resolveByShopProcessId($shopProcessId);
+        } catch (\Throwable $e) {
+            Log::error('Bancard: tenant resolver falló; se acusa 200 sin procesar', [
+                'shop_process_id' => $shopProcessId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    /**
+     * El resolver configurado (`bancard.tenant_resolver`: class-string o instancia), o
+     * GlobalTenantResolver (llaves globales) si no hay ninguno → single-tenant intacto.
+     */
+    protected function tenantResolver(): BancardTenantResolver
+    {
+        $resolver = config('bancard.tenant_resolver');
+
+        if ($resolver instanceof BancardTenantResolver) {
+            return $resolver;
+        }
+
+        if (is_string($resolver) && $resolver !== '') {
+            return app($resolver);
+        }
+
+        return new GlobalTenantResolver();
+    }
+
+    /**
      * Handle Bancard webhook for card registration (catastro).
+     *
+     * NOTA: el catastro NO tiene webhook estándar servidor-a-servidor (se completa con
+     * el iframe + syncBancardCards()). Este handler se mantiene por compatibilidad con
+     * integraciones no estándar; el soporte per-tenant del catastro es Front 1b.
      */
     public function handleCardRegistration(Request $request): JsonResponse
     {
@@ -92,19 +238,27 @@ class WebhookController extends Controller
 
         $this->logReceived('Bancard card registration webhook received', $payload);
 
+        // SEGURIDAD (deshabilitado por default): el catastro NO tiene webhook estándar
+        // servidor-a-servidor, y este callback NO está autenticado (la fórmula del token
+        // de cards/new no está en la spec). Procesarlo permitiría que un POST no
+        // autenticado escriba una tarjeta (asociando un alias_token arbitrario a un
+        // user_id) y dispare CardRegistered. Por eso, por default, NO se procesa: se
+        // acusa 200 y se ignora. El flujo recomendado es syncBancardCards() (pull
+        // autenticado). Un integrador con una integración no estándar debe habilitarlo
+        // explícitamente (BANCARD_CARD_REGISTRATION_WEBHOOK=true) Y protegerlo con su
+        // propia autenticación (IP allow-list / verificación de firma) vía middleware.
+        if (! config('bancard.card_registration_webhook_enabled', false)) {
+            Log::info('Bancard card registration webhook deshabilitado por default; usá syncBancardCards()', [
+                'shop_process_id' => $payload['operation']['shop_process_id'] ?? null,
+            ]);
+
+            return response()->json(['status' => 'success', 'disabled' => true]);
+        }
+
         try {
             $operation = $payload['operation'] ?? [];
 
-            // TODO[seguridad]: validar el token del callback de catastro ANTES de confiar
-            // en el payload. La fórmula del token de "cards/new" NO está en el PDF
-            // disponible; debe confirmarse contra la doc oficial de Catastro de Bancard e
-            // implementarse en BancardVPOSService::validateCardRegistrationToken().
-            // Mientras tanto el endpoint depende del middleware configurado (ver config).
-
             if (($operation['response_code'] ?? '') === '00') {
-                // Bancard devuelve user_id/card_id como campos discretos en el callback
-                // (los mismos que enviamos en initiateCardRegistration), NO dentro de un
-                // shop_process_id compuesto.
                 $userId = (int) ($operation['user_id'] ?? 0);
                 $cardId = (int) ($operation['card_id'] ?? 0);
 
@@ -133,73 +287,9 @@ class WebhookController extends Controller
                 Log::info('Bancard card registration not approved', ['operation' => $operation]);
             }
 
-            // Acusar recibo con 200 en cualquier resultado de negocio (vPOS no reintenta).
             return response()->json(['status' => 'success']);
         } catch (\Throwable $e) {
             Log::error('Bancard card registration webhook failed', [
-                'error' => $e->getMessage(),
-                'payload' => $payload,
-            ]);
-
-            return response()->json(['status' => 'error'], 500);
-        }
-    }
-
-    /**
-     * Handle charge with token webhook (for 3DS confirmation).
-     */
-    public function handleChargeWithToken(Request $request): JsonResponse
-    {
-        $payload = $request->all();
-
-        $this->logReceived('Bancard charge with token webhook received', $payload);
-
-        try {
-            $operation = $payload['operation'] ?? [];
-
-            // Aceptamos AMBAS fórmulas (confirm/charge): Bancard usa una sola "URL de
-            // confirmación" en el portal, así que por /charge puede llegar tanto un
-            // charge/3DS como un single_buy. La fórmula "charge" se firma con el
-            // alias_token, que Bancard NO manda en el payload: lo recuperamos de la
-            // transacción guardada al cobrar (por eso el charge necesita
-            // persist_transactions=true para validar su webhook).
-            $aliasToken = $operation['alias_token'] ?? $this->lookupAliasToken((string) ($operation['shop_process_id'] ?? ''));
-
-            if (! Bancard::validateConfirmationToken($operation, $aliasToken)) {
-                // Token inválido con ambas fórmulas: no es un callback genuino.
-                // Logueamos y acusamos 200 (un no-200 podría hacer perder un callback
-                // legítimo por misconfig).
-                Log::warning('Invalid token in charge webhook', ['operation' => $operation]);
-
-                return response()->json(['status' => 'rejected'], 200);
-            }
-
-            $isApproved = ($operation['response_code'] ?? '') === '00';
-
-            // Idempotencia: deduplicar callbacks reenviados.
-            if (! $this->claimTransaction((string) ($operation['shop_process_id'] ?? ''), $isApproved, $operation)) {
-                return response()->json(['status' => 'success', 'duplicate' => true]);
-            }
-
-            if ($isApproved) {
-                PaymentSucceeded::dispatch(
-                    shopProcessId: (string) ($operation['shop_process_id'] ?? ''),
-                    response: ['confirmation' => $operation],
-                    authorizationNumber: $operation['authorization_number'] ?? null,
-                    ticketNumber: $operation['ticket_number'] ?? null,
-                );
-            } else {
-                PaymentFailed::dispatch(
-                    shopProcessId: (string) ($operation['shop_process_id'] ?? ''),
-                    response: ['confirmation' => $operation],
-                    errorCode: $operation['response_code'] ?? null,
-                    errorMessage: $operation['extended_response_description'] ?? $operation['response_description'] ?? null,
-                );
-            }
-
-            return response()->json(['status' => 'success']);
-        } catch (\Throwable $e) {
-            Log::error('Bancard charge with token webhook failed', [
                 'error' => $e->getMessage(),
                 'payload' => $payload,
             ]);
@@ -244,7 +334,8 @@ class WebhookController extends Controller
     /**
      * Reclama atómicamente el shop_process_id para idempotencia. Devuelve true si
      * es la primera vez que se procesa, false si es un callback duplicado/reenvío.
-     * Si la persistencia está desactivada o falla, procesa igual (sin dedup).
+     * Si la persistencia está desactivada o falla, procesa igual (sin dedup) — el
+     * consumidor con idempotencia propia la enchufa en su listener.
      */
     protected function claimTransaction(string $shopProcessId, bool $isPaid, array $payload): bool
     {
@@ -283,8 +374,8 @@ class WebhookController extends Controller
     /**
      * Persist a registered card.
      *
-     * NOTA: soporta un único modelo de usuario (config bancard.user_model). Para
-     * múltiples modelos / morph map habría que propagar el morph class desde el alta.
+     * NOTA: soporta un único modelo de usuario (config bancard.user_model). El scoping
+     * per-tenant de tarjetas es Front 1b.
      */
     protected function saveCard(int|string $userId, int $cardId, array $operation): ?SavedCard
     {

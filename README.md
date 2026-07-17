@@ -57,6 +57,11 @@ BANCARD_PERSIST_TRANSACTIONS=true      # registra cada operación para idempoten
 BANCARD_CHECKOUT_SCRIPT_VERSION=4.0.0  # versión del SDK JS de checkout
 BANCARD_ENABLE_3DS=false               # 3DS en charge (opt-in): requiere que Bancard habilite el producto 3DS al comercio
 BANCARD_USER_MODEL="App\\Models\\User"
+BANCARD_CARD_REGISTRATION_WEBHOOK=false # webhook de catastro (default off por seguridad; usá syncBancardCards())
+# Multi-tenant (ver docs/multi-tenant.md):
+BANCARD_TENANT_RESOLVER=               # class-string de BancardTenantResolver; vacío = single-tenant (llaves globales)
+BANCARD_WEBHOOK_VERIFICATION=token     # token | requery (requery = re-consulta el estado a Bancard, zero-trust)
+BANCARD_WEBHOOK_REQUERY_TIMEOUT=8      # segundos, solo modo requery (<30s)
 ```
 
 ## Uso

@@ -12,7 +12,7 @@ use Softlab180\Bancard\Services\BancardVPOSService;
  * @method static array initiateCardRegistration(int|string $userId, int $cardId, string $userPhone, string $userEmail, ?string $returnUrl = null)
  * @method static array getUserCards(int|string $userId)
  * @method static array deleteCard(int|string $userId, string $aliasToken)
- * @method static array getPaymentConfirmation(string $shopProcessId)
+ * @method static array getPaymentConfirmation(string $shopProcessId, ?int $timeout = null)
  * @method static array rollbackPayment(string $shopProcessId)
  * @method static array processWebhook(array $payload, ?string $aliasToken = null)
  * @method static bool validateConfirmationToken(array $operation, ?string $aliasToken = null)
