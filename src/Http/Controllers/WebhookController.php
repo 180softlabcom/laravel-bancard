@@ -6,13 +6,11 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
-use Softlab180\Bancard\Events\CardRegistered;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
 use Softlab180\Bancard\Exceptions\BancardException;
 use Softlab180\Bancard\Exceptions\ConfirmationUnavailableException;
 use Softlab180\Bancard\Models\BancardTransaction;
-use Softlab180\Bancard\Models\SavedCard;
 use Softlab180\Bancard\Services\BancardVPOSService;
 use Softlab180\Bancard\Tenancy\BancardTenantContext;
 use Softlab180\Bancard\Tenancy\BancardTenantResolver;
@@ -21,38 +19,21 @@ use Softlab180\Bancard\Tenancy\GlobalTenantResolver;
 class WebhookController extends Controller
 {
     /**
-     * Confirmación de pago (Single Buy). Bancard usa UNA sola "URL de confirmación",
-     * así que por acá también puede llegar un charge; ambas rutas comparten handler.
-     */
-    public function handlePayment(Request $request): JsonResponse
-    {
-        return $this->handleConfirmation($request, 'Bancard payment webhook received');
-    }
-
-    /**
-     * Confirmación de pago con token (charge / 3DS). Mismo handler que /payment:
-     * el tenant se resuelve por shop_process_id y la fórmula (confirm/charge) se
-     * acepta indistintamente.
-     */
-    public function handleChargeWithToken(Request $request): JsonResponse
-    {
-        return $this->handleConfirmation($request, 'Bancard charge with token webhook received');
-    }
-
-    /**
-     * Handler común de confirmación (single_buy + charge), multi-tenant.
+     * Webhook ÚNICO de confirmación (single_buy + charge/3DS), multi-tenant.
      *
-     * Flujo: resolver el comercio dueño del shop_process_id → construir un service
-     * PER-TENANT con SUS llaves (nunca el singleton global) → verificar el callback
-     * (token o re-query) con esa instancia → idempotencia → despachar el evento con
-     * el tenantRef. Fail-safe: cualquier duda (tenant no resuelto, re-query caída) se
-     * acusa 200 sin procesar y se deja para reconciliar; nunca 500 por esos casos.
+     * Bancard usa una sola "URL de confirmación" (portal de comercios) y por ahí llegan
+     * AMBOS tipos de callback; no hay webhooks separados por tipo. Flujo: resolver el
+     * comercio dueño del shop_process_id → construir un service PER-TENANT con SUS llaves
+     * (nunca el singleton global) → verificar el callback (token o re-query) con esa
+     * instancia → idempotencia → despachar el evento con el tenantRef. Fail-safe:
+     * cualquier duda (tenant no resuelto, re-query caída) se acusa 200 sin procesar y se
+     * deja para reconciliar; nunca 500 por esos casos.
      */
-    protected function handleConfirmation(Request $request, string $logLabel): JsonResponse
+    public function handleConfirmation(Request $request): JsonResponse
     {
         $payload = $request->all();
 
-        $this->logReceived($logLabel, $payload);
+        $this->logReceived('Bancard confirmation webhook received', $payload);
 
         try {
             $operation = $payload['operation'] ?? [];
@@ -226,79 +207,6 @@ class WebhookController extends Controller
     }
 
     /**
-     * Handle Bancard webhook for card registration (catastro).
-     *
-     * NOTA: el catastro NO tiene webhook estándar servidor-a-servidor (se completa con
-     * el iframe + syncBancardCards()). Este handler se mantiene por compatibilidad con
-     * integraciones no estándar; el soporte per-tenant del catastro es Front 1b.
-     */
-    public function handleCardRegistration(Request $request): JsonResponse
-    {
-        $payload = $request->all();
-
-        $this->logReceived('Bancard card registration webhook received', $payload);
-
-        // SEGURIDAD (deshabilitado por default): el catastro NO tiene webhook estándar
-        // servidor-a-servidor, y este callback NO está autenticado (la fórmula del token
-        // de cards/new no está en la spec). Procesarlo permitiría que un POST no
-        // autenticado escriba una tarjeta (asociando un alias_token arbitrario a un
-        // user_id) y dispare CardRegistered. Por eso, por default, NO se procesa: se
-        // acusa 200 y se ignora. El flujo recomendado es syncBancardCards() (pull
-        // autenticado). Un integrador con una integración no estándar debe habilitarlo
-        // explícitamente (BANCARD_CARD_REGISTRATION_WEBHOOK=true) Y protegerlo con su
-        // propia autenticación (IP allow-list / verificación de firma) vía middleware.
-        if (! config('bancard.card_registration_webhook_enabled', false)) {
-            Log::info('Bancard card registration webhook deshabilitado por default; usá syncBancardCards()', [
-                'shop_process_id' => $payload['operation']['shop_process_id'] ?? null,
-            ]);
-
-            return response()->json(['status' => 'success', 'disabled' => true]);
-        }
-
-        try {
-            $operation = $payload['operation'] ?? [];
-
-            if (($operation['response_code'] ?? '') === '00') {
-                $userId = (int) ($operation['user_id'] ?? 0);
-                $cardId = (int) ($operation['card_id'] ?? 0);
-
-                $savedCard = null;
-                if (config('bancard.auto_save_cards', true)) {
-                    try {
-                        $savedCard = $this->saveCard($userId, $cardId, $operation);
-                    } catch (\Throwable $e) {
-                        // La tarjeta ya quedó registrada en Bancard; logueamos para
-                        // conciliar sin devolver 500 (no perder el callback).
-                        Log::error('Bancard saveCard failed (card registered at Bancard)', [
-                            'error' => $e->getMessage(),
-                            'user_id' => $userId,
-                            'card_id' => $cardId,
-                        ]);
-                    }
-                }
-
-                CardRegistered::dispatch(
-                    userId: $userId,
-                    cardId: $cardId,
-                    response: $operation,
-                    savedCard: $savedCard,
-                );
-            } else {
-                Log::info('Bancard card registration not approved', ['operation' => $operation]);
-            }
-
-            return response()->json(['status' => 'success']);
-        } catch (\Throwable $e) {
-            Log::error('Bancard card registration webhook failed', [
-                'error' => $e->getMessage(),
-                'payload' => $payload,
-            ]);
-
-            return response()->json(['status' => 'error'], 500);
-        }
-    }
-
-    /**
      * Loguea la recepción del webhook. El payload completo solo se loguea si
      * `bancard.webhook.log_payloads` está activo (BANCARD_LOG_WEBHOOKS); si no,
      * loguea únicamente el shop_process_id (higiene en producción).
@@ -371,33 +279,4 @@ class WebhookController extends Controller
         }
     }
 
-    /**
-     * Persist a registered card.
-     *
-     * NOTA: soporta un único modelo de usuario (config bancard.user_model). El scoping
-     * per-tenant de tarjetas es Front 1b.
-     */
-    protected function saveCard(int|string $userId, int $cardId, array $operation): ?SavedCard
-    {
-        if (! $userId || ! isset($operation['alias_token'])) {
-            return null;
-        }
-
-        $userType = config('bancard.user_model', 'App\\Models\\User');
-
-        return SavedCard::updateOrCreate(
-            [
-                'user_id' => $userId,
-                'user_type' => $userType,
-                'alias_token' => $operation['alias_token'],
-            ],
-            [
-                'card_masked_number' => $operation['card_masked_number'] ?? null,
-                'card_brand' => $operation['card_brand'] ?? null,
-                'card_type' => $operation['card_type'] ?? null,
-                'expiration_date' => $operation['expiration_date'] ?? null,
-                'card_id' => $cardId,
-            ]
-        );
-    }
 }
