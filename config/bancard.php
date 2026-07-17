@@ -184,6 +184,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Saved Cards Tenant Column (multi-tenant)
+    |--------------------------------------------------------------------------
+    |
+    | Columna de bancard_saved_cards que scopea la tarjeta por comercio (multi-tenant).
+    | El trait la setea con el tenantRef del BancardTenantContext al sincronizar, y
+    | scopea las consultas por ella. Cambiala si tu tabla ya tiene una columna equivalente
+    | (p.ej. 'commerce_id') para no duplicar el concepto. En single-tenant queda null.
+    |
+    */
+    'saved_cards_tenant_column' => env('BANCARD_SAVED_CARDS_TENANT_COLUMN', 'tenant_ref'),
+
+    /*
+    |--------------------------------------------------------------------------
     | User Model
     |--------------------------------------------------------------------------
     |

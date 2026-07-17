@@ -13,6 +13,10 @@ class TestUser extends Model
 {
     use HasBancardCards;
 
+    // Atributo id seteado para que la relación morphMany (que usa el atributo, no
+    // getKey()) resuelva la clave del padre en un modelo no persistido.
+    protected $attributes = ['id' => 1];
+
     public function getKey()
     {
         return 1;

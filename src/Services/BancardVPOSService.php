@@ -17,14 +17,19 @@ class BancardVPOSService
     protected string $baseUrl;
     protected string $checkoutUrl;
 
+    /** Toggles por-tenant (p.ej. enable_3ds). Vacío = cae a config('bancard.*') global. */
+    protected array $flags = [];
+
     public function __construct(
         ?string $publicKey = null,
         ?string $privateKey = null,
-        string $environment = 'staging'
+        string $environment = 'staging',
+        array $flags = []
     ) {
         $this->publicKey = $publicKey ?? config('bancard.public_key');
         $this->privateKey = $privateKey ?? config('bancard.private_key');
         $this->environment = $environment;
+        $this->flags = $flags;
 
         $this->baseUrl = config('bancard.urls')[$environment]
             ?? 'https://vpos.infonet.com.py:8888';
@@ -40,7 +45,16 @@ class BancardVPOSService
      */
     public static function forContext(\Softlab180\Bancard\Tenancy\BancardTenantContext $context): self
     {
-        return new self($context->publicKey, $context->privateKey, $context->environment);
+        return new self($context->publicKey, $context->privateKey, $context->environment, $context->flags);
+    }
+
+    /**
+     * Lee un flag por-tenant (p.ej. enable_3ds) de la instancia; si el comercio no lo
+     * define, cae al $default (típicamente config('bancard.*') global → single-tenant).
+     */
+    public function flag(string $key, mixed $default = null): mixed
+    {
+        return $this->flags[$key] ?? $default;
     }
 
     /*
@@ -189,7 +203,8 @@ class BancardVPOSService
         // RECHACE la operación ("parámetro extra no habilitado", con riesgo en
         // producción — reportado por Bancard en homologación). Un comercio sin 3DS
         // NO debe enviarlo. Para el flujo 3DS, la spec (pág. 37) pide enviarlo siempre.
-        if (config('bancard.enable_3ds', false)) {
+        // El flag se lee por-tenant (flags del context); fallback a config global.
+        if ($this->flag('enable_3ds', config('bancard.enable_3ds', false))) {
             $operation['extra_response_attributes'] = ['confirmation.process_id'];
         }
 
