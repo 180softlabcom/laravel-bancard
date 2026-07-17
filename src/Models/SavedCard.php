@@ -20,6 +20,7 @@ class SavedCard extends Model
         'card_id',
         'is_default',
         'metadata',
+        'tenant_ref',
     ];
 
     protected $casts = [
@@ -59,6 +60,15 @@ class SavedCard extends Model
     public function scopeDefault($query)
     {
         return $query->where('is_default', true);
+    }
+
+    /**
+     * Scope por comercio (multi-tenant). Usa la columna configurada en
+     * bancard.saved_cards_tenant_column (default 'tenant_ref').
+     */
+    public function scopeForTenant($query, $tenantRef, ?string $column = null)
+    {
+        return $query->where($column ?? config('bancard.saved_cards_tenant_column', 'tenant_ref'), $tenantRef);
     }
 
     /**
@@ -115,13 +125,23 @@ class SavedCard extends Model
      */
     public function setAsDefault(): void
     {
-        // Remove default from other cards
-        static::where('user_id', $this->user_id)
-            ->where('user_type', $this->user_type)
-            ->where('id', '!=', $this->id)
-            ->update(['is_default' => false]);
+        // Desmarcar las OTRAS tarjetas del usuario — scopeado por comercio (multi-tenant):
+        // elegir la default en un comercio NO debe tocar la default de otro comercio.
+        $column = config('bancard.saved_cards_tenant_column', 'tenant_ref');
+        $tenantValue = $this->getAttribute($column);
 
-        // Set this card as default
+        $query = static::where('user_id', $this->user_id)
+            ->where('user_type', $this->user_type)
+            ->where('id', '!=', $this->id);
+
+        // single-tenant: tenant_ref es null en todas → desmarca dentro de ese scope null.
+        $tenantValue === null
+            ? $query->whereNull($column)
+            : $query->where($column, $tenantValue);
+
+        $query->update(['is_default' => false]);
+
+        // Marcar esta como default
         $this->update(['is_default' => true]);
     }
 }

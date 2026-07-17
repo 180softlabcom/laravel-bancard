@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Http;
 use ReflectionMethod;
 use Softlab180\Bancard\Contracts\Payable;
 use Softlab180\Bancard\Services\BancardVPOSService;
+use Softlab180\Bancard\Tenancy\BancardTenantContext;
 use Softlab180\Bancard\Tests\TestCase;
 
 class BancardVPOSServiceTest extends TestCase
@@ -220,6 +221,29 @@ class BancardVPOSServiceTest extends TestCase
         $this->service()->chargeWithToken($this->payable(), 'alias-xyz', 1, null, 'https://mi.app/portal/3ds');
 
         Http::assertSent(fn ($request) => str_contains($request->data()['operation']['return_url'], 'shop_process_id='));
+    }
+
+    public function test_enable_3ds_del_tenant_prende_aunque_el_config_global_este_off(): void
+    {
+        // 1c: el flag se resuelve por-tenant (flags del context), no del config global.
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => false]); // global OFF
+        Http::fake(['*/vpos/api/0.3/charge' => Http::response(['confirmation' => ['response' => 'S', 'response_code' => '00']])]);
+
+        $ctx = new BancardTenantContext('pub', 'priv', 'production', ['enable_3ds' => true]);
+        BancardVPOSService::forContext($ctx)->chargeWithToken($this->payable(), 'alias-xyz');
+
+        Http::assertSent(fn ($r) => ($r->data()['operation']['extra_response_attributes'] ?? null) === ['confirmation.process_id']);
+    }
+
+    public function test_enable_3ds_del_tenant_apaga_aunque_el_config_global_este_on(): void
+    {
+        config(['bancard.persist_transactions' => false, 'bancard.enable_3ds' => true]); // global ON
+        Http::fake(['*/vpos/api/0.3/charge' => Http::response(['confirmation' => ['response' => 'S', 'response_code' => '00']])]);
+
+        $ctx = new BancardTenantContext('pub', 'priv', 'production', ['enable_3ds' => false]);
+        BancardVPOSService::forContext($ctx)->chargeWithToken($this->payable(), 'alias-xyz');
+
+        Http::assertSent(fn ($r) => ! isset($r->data()['operation']['extra_response_attributes']));
     }
 
     public function test_charge_con_3ds_pendiente_devuelve_requires_3ds(): void

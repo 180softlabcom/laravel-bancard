@@ -5,6 +5,8 @@ namespace Softlab180\Bancard\Traits;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Softlab180\Bancard\Facades\Bancard;
 use Softlab180\Bancard\Models\SavedCard;
+use Softlab180\Bancard\Services\BancardVPOSService;
+use Softlab180\Bancard\Tenancy\BancardTenantContext;
 
 /**
  * Trait to add Bancard saved cards functionality to a model.
@@ -17,11 +19,17 @@ use Softlab180\Bancard\Models\SavedCard;
  *     {
  *         use HasBancardCards;
  *     }
+ *
+ * Multi-tenant: el catastro/charge es iniciado por el consumidor (que ya conoce el
+ * comercio), así que cada método acepta un `?BancardTenantContext $tenant` explícito.
+ * Con $tenant: opera contra las llaves de ESE comercio y scopea las tarjetas por la
+ * columna `bancard.saved_cards_tenant_column`. Sin $tenant (null): single-tenant, usa
+ * las llaves globales y no scopea — comportamiento idéntico al anterior.
  */
 trait HasBancardCards
 {
     /**
-     * Get all saved Bancard cards for this user.
+     * Get all saved Bancard cards for this user (sin scope de tenant).
      */
     public function bancardCards(): MorphMany
     {
@@ -29,12 +37,12 @@ trait HasBancardCards
     }
 
     /**
-     * Get the default Bancard card.
+     * Get the default Bancard card (scopeado por tenant si se provee).
      */
-    public function defaultBancardCard(): ?SavedCard
+    public function defaultBancardCard(?BancardTenantContext $tenant = null): ?SavedCard
     {
-        return $this->bancardCards()->where('is_default', true)->first()
-            ?? $this->bancardCards()->first();
+        return $this->bancardCardsQuery($tenant)->where('is_default', true)->first()
+            ?? $this->bancardCardsQuery($tenant)->first();
     }
 
     /**
@@ -46,12 +54,13 @@ trait HasBancardCards
      */
     public function registerBancardCard(
         int $cardId,
-        ?string $returnUrl = null
+        ?string $returnUrl = null,
+        ?BancardTenantContext $tenant = null
     ): array {
         $phone = $this->phone ?? $this->phone_number ?? '';
         $email = $this->email ?? '';
 
-        return Bancard::initiateCardRegistration(
+        return $this->bancardService($tenant)->initiateCardRegistration(
             userId: $this->getKey(),
             cardId: $cardId,
             userPhone: $phone,
@@ -63,9 +72,9 @@ trait HasBancardCards
     /**
      * Get all registered cards from Bancard API.
      */
-    public function getBancardCards(): array
+    public function getBancardCards(?BancardTenantContext $tenant = null): array
     {
-        return Bancard::getUserCards($this->getKey());
+        return $this->bancardService($tenant)->getUserCards($this->getKey());
     }
 
     /**
@@ -77,31 +86,43 @@ trait HasBancardCards
      * tarjeta. No depende de un webhook (Bancard no envía callback de catastro).
      *
      * Usa getMorphClass()/getKey() para respetar morph maps y soportar múltiples
-     * modelos de usuario.
+     * modelos de usuario. Con $tenant, consulta con las llaves de ese comercio y
+     * persiste el tenantRef en la columna de scoping.
      *
      * @return \Illuminate\Support\Collection<int, SavedCard>
      */
-    public function syncBancardCards(): \Illuminate\Support\Collection
+    public function syncBancardCards(?BancardTenantContext $tenant = null): \Illuminate\Support\Collection
     {
-        $result = Bancard::getUserCards($this->getKey());
+        $result = $this->bancardService($tenant)->getUserCards($this->getKey());
+
+        $tenantColumn = $this->bancardTenantColumn();
+        $tenantRef = $tenant?->tenantRef;
 
         return collect($result['cards'] ?? [])
             ->filter(fn ($card) => ! empty($card['alias_token']))
-            ->map(function (array $card) {
-                return SavedCard::updateOrCreate(
-                    [
-                        'user_type' => $this->getMorphClass(),
-                        'user_id' => $this->getKey(),
-                        'alias_token' => $card['alias_token'],
-                    ],
-                    [
-                        'card_masked_number' => $card['card_masked_number'] ?? null,
-                        'card_brand' => $card['card_brand'] ?? null,
-                        'card_type' => $card['card_type'] ?? null,
-                        'expiration_date' => $card['expiration_date'] ?? null,
-                        'card_id' => $card['card_id'] ?? null,
-                    ]
-                );
+            ->map(function (array $card) use ($tenantColumn, $tenantRef) {
+                $model = SavedCard::firstOrNew([
+                    'user_type' => $this->getMorphClass(),
+                    'user_id' => $this->getKey(),
+                    'alias_token' => $card['alias_token'],
+                ]);
+
+                $model->fill([
+                    'card_masked_number' => $card['card_masked_number'] ?? null,
+                    'card_brand' => $card['card_brand'] ?? null,
+                    'card_type' => $card['card_type'] ?? null,
+                    'expiration_date' => $card['expiration_date'] ?? null,
+                    'card_id' => $card['card_id'] ?? null,
+                ]);
+
+                // Set directo (bypassa $fillable): soporta una columna de tenant configurable.
+                if ($tenantRef !== null) {
+                    $model->setAttribute($tenantColumn, $tenantRef);
+                }
+
+                $model->save();
+
+                return $model;
             })
             ->values();
     }
@@ -109,13 +130,13 @@ trait HasBancardCards
     /**
      * Delete a saved card.
      */
-    public function deleteBancardCard(string $aliasToken): array
+    public function deleteBancardCard(string $aliasToken, ?BancardTenantContext $tenant = null): array
     {
-        // Delete from Bancard
-        $result = Bancard::deleteCard($this->getKey(), $aliasToken);
+        // Delete from Bancard (con las llaves del comercio si se provee tenant)
+        $result = $this->bancardService($tenant)->deleteCard($this->getKey(), $aliasToken);
 
-        // Delete local record
-        $this->bancardCards()->where('alias_token', $aliasToken)->delete();
+        // Delete local record (scopeado por tenant)
+        $this->bancardCardsQuery($tenant)->where('alias_token', $aliasToken)->delete();
 
         return $result;
     }
@@ -133,15 +154,16 @@ trait HasBancardCards
         $payable,
         int $numberOfPayments = 1,
         ?string $description = null,
-        ?string $returnUrl = null
+        ?string $returnUrl = null,
+        ?BancardTenantContext $tenant = null
     ): array {
-        $card = $this->defaultBancardCard();
+        $card = $this->defaultBancardCard($tenant);
 
         if (!$card) {
             throw new \RuntimeException('No hay tarjeta guardada para este usuario.');
         }
 
-        return Bancard::chargeWithToken(
+        return $this->bancardService($tenant)->chargeWithToken(
             payable: $payable,
             aliasToken: $card->alias_token,
             numberOfPayments: $numberOfPayments,
@@ -158,9 +180,10 @@ trait HasBancardCards
         $payable,
         int $numberOfPayments = 1,
         ?string $description = null,
-        ?string $returnUrl = null
+        ?string $returnUrl = null,
+        ?BancardTenantContext $tenant = null
     ): array {
-        return Bancard::chargeWithToken(
+        return $this->bancardService($tenant)->chargeWithToken(
             payable: $payable,
             aliasToken: $card->alias_token,
             numberOfPayments: $numberOfPayments,
@@ -172,16 +195,50 @@ trait HasBancardCards
     /**
      * Check if the user has any saved cards.
      */
-    public function hasBancardCards(): bool
+    public function hasBancardCards(?BancardTenantContext $tenant = null): bool
     {
-        return $this->bancardCards()->exists();
+        return $this->bancardCardsQuery($tenant)->exists();
     }
 
     /**
      * Get the count of saved cards.
      */
-    public function bancardCardsCount(): int
+    public function bancardCardsCount(?BancardTenantContext $tenant = null): int
     {
-        return $this->bancardCards()->count();
+        return $this->bancardCardsQuery($tenant)->count();
+    }
+
+    /**
+     * Service Bancard a usar: per-tenant si se provee el context (sus llaves), o el
+     * singleton global (single-tenant) si no.
+     */
+    protected function bancardService(?BancardTenantContext $tenant): BancardVPOSService
+    {
+        return $tenant !== null
+            ? BancardVPOSService::forContext($tenant)
+            : app(BancardVPOSService::class);
+    }
+
+    /**
+     * Columna de scoping por comercio (configurable).
+     */
+    protected function bancardTenantColumn(): string
+    {
+        return config('bancard.saved_cards_tenant_column', 'tenant_ref');
+    }
+
+    /**
+     * Query de tarjetas del usuario, scopeada por tenant si se provee.
+     */
+    protected function bancardCardsQuery(?BancardTenantContext $tenant): MorphMany
+    {
+        $query = $this->bancardCards();
+
+        if ($tenant !== null) {
+            // Usa el scope del modelo (misma resolución de columna que setAsDefault).
+            $query->forTenant($tenant->tenantRef);
+        }
+
+        return $query;
     }
 }
