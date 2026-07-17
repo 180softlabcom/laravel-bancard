@@ -6,6 +6,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
+use Softlab180\Bancard\Contracts\BancardIdempotencyStore;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
 use Softlab180\Bancard\Exceptions\BancardException;
@@ -71,10 +72,17 @@ class WebhookController extends Controller
                 return response()->json(['status' => 'success', 'pending' => true]);
             }
 
-            // Idempotencia: un callback reenviado por vPOS se acusa 200 sin re-despachar.
-            if (! $this->claimTransaction($shopProcessId, $isPaid, $confirmation)) {
+            // Idempotencia SIEMPRE activa (independiente de persist_transactions): un
+            // callback reenviado por vPOS —o un replay— se acusa 200 sin re-despachar.
+            // Cierra H2: el consumidor ya no depende de la idempotencia de su listener.
+            if (! $this->idempotencyStore()->claim($shopProcessId)) {
                 return response()->json(['status' => 'success', 'duplicate' => true]);
             }
+
+            // Registro de negocio completo (opcional, persist_transactions=true): estado
+            // final + payload para conciliación. NO es el gate de dedup (de eso ya se
+            // encargó el store) — solo bookkeeping.
+            $this->recordOutcome($shopProcessId, $isPaid, $confirmation);
 
             // El evento ya quedó reclamado (idempotencia): un listener SÍNCRONO que lanza
             // NO debe convertir esto en 500, porque perdería el ack (vPOS no reintenta) y
@@ -237,62 +245,74 @@ class WebhookController extends Controller
     }
 
     /**
-     * Recupera el alias_token de la transacción registrada al cobrar (charge). El
-     * token del webhook de charge se firma con el alias_token, que Bancard NO manda
-     * en el payload; sin persistencia no se puede validar (devuelve null → el charge
-     * cae en la rama de token inválido). Un single_buy no tiene alias (devuelve null).
+     * Recupera el alias_token con el que se firma el token del webhook de charge (Bancard
+     * NO lo manda en el payload). Lo guarda el idempotency_store al cobrar, así que se
+     * valida el charge SIN depender de persist_transactions. Fallback: transacciones
+     * viejas (previas al store) lo tienen en bancard_transactions (persist=true). Un
+     * single_buy no tiene alias → null (cae en la fórmula "confirm").
      */
     protected function lookupAliasToken(string $shopProcessId): ?string
     {
-        if ($shopProcessId === '' || ! config('bancard.persist_transactions', true)) {
+        if ($shopProcessId === '') {
             return null;
         }
 
-        try {
-            return BancardTransaction::where('shop_process_id', $shopProcessId)->value('alias_token');
-        } catch (\Throwable $e) {
-            return null;
+        $alias = $this->idempotencyStore()->aliasTokenFor($shopProcessId);
+
+        if ($alias !== null) {
+            return $alias;
         }
+
+        // Compat: charges registrados antes del store guardan el alias en bancard_transactions.
+        if (config('bancard.persist_transactions', true)) {
+            try {
+                return BancardTransaction::where('shop_process_id', $shopProcessId)->value('alias_token');
+            } catch (\Throwable $e) {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     /**
-     * Reclama atómicamente el shop_process_id para idempotencia. Devuelve true si
-     * es la primera vez que se procesa, false si es un callback duplicado/reenvío.
-     * Si la persistencia está desactivada o falla, procesa igual (sin dedup) — el
-     * consumidor con idempotencia propia la enchufa en su listener.
+     * Registra el RESULTADO del pago en bancard_transactions (solo si persist=true). Es
+     * bookkeeping/conciliación para el consumidor que optó por la tabla completa; la
+     * idempotencia ya la garantizó el idempotency_store, así que acá no hay gate. Un
+     * charge crea la fila 'pending' al cobrar (updateOrCreate), un single_buy quizás no
+     * exista → se crea con el estado final. Best-effort: nunca rompe el ack del webhook.
      */
-    protected function claimTransaction(string $shopProcessId, bool $isPaid, array $payload): bool
+    protected function recordOutcome(string $shopProcessId, bool $isPaid, array $payload): void
     {
         if ($shopProcessId === '' || ! config('bancard.persist_transactions', true)) {
-            return true;
+            return;
         }
 
         try {
-            BancardTransaction::firstOrCreate(
+            BancardTransaction::updateOrCreate(
                 ['shop_process_id' => $shopProcessId],
-                ['status' => 'pending']
-            );
-
-            // UPDATE atómico: solo el primer callback transiciona desde 'pending'.
-            $claimed = BancardTransaction::where('shop_process_id', $shopProcessId)
-                ->where('status', 'pending')
-                ->update([
+                [
                     'status' => $isPaid ? 'paid' : 'failed',
                     'authorization_number' => $payload['authorization_number'] ?? null,
                     'ticket_number' => $payload['ticket_number'] ?? null,
                     'last_payload' => json_encode($payload),
                     'processed_at' => now(),
-                ]);
-
-            return $claimed > 0;
+                ]
+            );
         } catch (\Throwable $e) {
-            Log::warning('Bancard: claim de transacción falló; se procesa sin dedup', [
+            Log::warning('Bancard: no se pudo registrar el resultado de la transacción', [
                 'shop_process_id' => $shopProcessId,
                 'error' => $e->getMessage(),
             ]);
-
-            return true;
         }
     }
 
+    /**
+     * Store de idempotencia del webhook (dedup + alias_token del charge), resuelto del
+     * contenedor (bancard.idempotency_store; default Eloquent).
+     */
+    protected function idempotencyStore(): BancardIdempotencyStore
+    {
+        return app(BancardIdempotencyStore::class);
+    }
 }

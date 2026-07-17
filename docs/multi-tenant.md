@@ -147,17 +147,23 @@ globales** de config. → **single-tenant queda idéntico a hoy**; multi-tenant 
 
 ### R3 — Idempotencia como costura inyectable (no acople)
 
-`persist_transactions` **nunca** es condición para converger:
+> **Implementado en v2.1.0** (el diseño original dejaba la idempotencia en el listener cuando
+> `persist_transactions=false`; el hardening la subió al paquete). Lo de abajo refleja lo entregado.
 
-- Consumidor con idempotencia propia (p.ej. `merchant_notified_at` + `markAsPaid`-si-pending):
-  deja `persist_transactions=false` → el paquete no deduplica → su **listener es idempotente**.
-- Consumidor sin idempotencia propia: deja el dedup del paquete (`claimTransaction`, requiere
-  persist) activo.
+`persist_transactions` **nunca** es condición para converger — y la idempotencia **tampoco**
+depende de él: el paquete deduplica el `shop_process_id` de forma **atómica SIEMPRE** vía el
+`BancardIdempotencyStore` (default Eloquent, tabla `bancard_processed_callbacks`; **inyectable** por
+`bancard.idempotency_store` → Redis, tabla propia, etc.). El store también guarda el `alias_token`
+del charge, así que el charge valida **sin** `persist_transactions`.
 
-> **Nota de migración (Front 2):** con `persist_transactions=false`, el guard de idempotencia de
-> la fila de negocio del consumidor (hoy suele vivir en el callback del browser) debe **moverse
-> al listener** — pasa a ser el único dedup de esa fila. El criterio de aceptación testea
-> "replay se deduplica".
+- Consumidor **sin** idempotencia propia: no hace nada — el guard del paquete deduplica por él.
+- Consumidor **con** idempotencia propia: la mantiene como defensa en profundidad de **sus** efectos
+  (fulfillment, ledger), pero ya no es la *única* barrera contra el doble-despacho.
+- `persist_transactions=true` (default) suma el registro completo (`bancard_transactions`) para
+  conciliación; `=false` conserva la dedup, solo omite esa fila de negocio.
+
+> **Nota de migración (Front 2):** el guard de idempotencia vive en el paquete, no en la disciplina
+> del consumidor. El criterio de aceptación testea "replay se deduplica **con `persist_transactions=false`**".
 
 ### R4 — Eventos con payload suficiente
 
@@ -269,10 +275,10 @@ global)**:
 
 - `single_buy` y `charge` **validan** y marcan pagado **vía listener** (no vía código del
   webhook casero);
-- un **replay** se deduplica (por la idempotencia del consumidor o del paquete);
+- un **replay** se deduplica (por el guard del paquete, **aun con `persist_transactions=false`**);
 - un **callback forjado** se rechaza;
 - un `shop_process_id` **desconocido** → HTTP 200 sin procesar;
-- **sin una línea de seguridad casera** en el consumidor, con `persist_transactions=false`.
+- **sin una línea de seguridad ni de idempotencia casera** en el consumidor, con `persist_transactions=false`.
 
 ## 8. No-breaking (garantía)
 
@@ -289,7 +295,7 @@ global)**:
 |----------|----------------|------|
 | R1 Resolver (no atado a BancardTransaction) | `BancardTenantResolver::resolveByShopProcessId` | 1a |
 | R2 (implícito) Mecanismo webhook per-tenant | `forContext()` + `WebhookController` sin singleton | 1a |
-| R3 Idempotencia inyectable | `persist_transactions=false` + listener idempotente | 1a |
+| R3 Idempotencia inyectable | `BancardIdempotencyStore` (dedup siempre-activa, inyectable), independiente de `persist_transactions` | v2.1.0 |
 | R4 Eventos suficientes + `tenantRef` | eventos actuales + `tenantRef` nuevo; brand/last-4 vía listener | 1a |
 | R5 Charge sin persistencia (re-query) | `webhook_verification='requery'` | 1a |
 | R6 Catastro pull per-tenant | `SavedCard.tenant_ref` + trait con context | 1b |

@@ -32,6 +32,22 @@ class SavedCard extends Model
         'alias_token',
     ];
 
+    public function __construct(array $attributes = [])
+    {
+        // La columna de scoping por comercio es CONFIGURABLE (bancard.saved_cards_tenant_column).
+        // El default 'tenant_ref' ya está en $fillable, pero un consumidor que reutiliza otra
+        // (p.ej. 'commerce_id') la perdería en el mass-assignment (create()/fill()) si no la
+        // agregamos acá → tarjeta guardada con tenant NULL = fuga cross-tenant. Se agrega
+        // dinámicamente para que el mass-assignment respete la columna real.
+        $column = config('bancard.saved_cards_tenant_column', 'tenant_ref');
+
+        if (is_string($column) && $column !== '' && ! in_array($column, $this->fillable, true)) {
+            $this->fillable[] = $column;
+        }
+
+        parent::__construct($attributes);
+    }
+
     /**
      * Get the parent user model (polymorphic).
      */

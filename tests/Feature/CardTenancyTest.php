@@ -4,6 +4,7 @@ namespace Softlab180\Bancard\Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Softlab180\Bancard\Models\SavedCard;
 use Softlab180\Bancard\Tenancy\BancardTenantContext;
 use Softlab180\Bancard\Tests\Fixtures\TestUser;
@@ -95,6 +96,46 @@ class CardTenancyTest extends TestCase
 
         $this->assertDatabaseHas('bancard_saved_cards', ['alias_token' => 'a_A', 'is_default' => true]);
         $this->assertDatabaseHas('bancard_saved_cards', ['alias_token' => 'a_B', 'is_default' => true]);
+    }
+
+    public function test_scoping_funciona_con_una_columna_de_tenant_personalizada(): void
+    {
+        // Escenario real de un consumidor (rga): su tabla ya tiene 'commerce_id', así que
+        // apunta bancard.saved_cards_tenant_column ahí en vez de usar 'tenant_ref'. Todo el
+        // scoping (sync, query per-tenant y mass-assignment) debe respetar esa columna.
+        Schema::table('bancard_saved_cards', fn ($t) => $t->string('commerce_id')->nullable());
+        config(['bancard.saved_cards_tenant_column' => 'commerce_id']);
+
+        Http::fake(['*/vpos/api/0.3/users/*/cards' => Http::response([
+            'status' => 'success',
+            'cards' => [['alias_token' => 'alias_A', 'card_id' => 1]],
+        ])]);
+
+        $ctxA = new BancardTenantContext('pub', 'k', 'production', [], 'commerce-A');
+        (new TestUser())->syncBancardCards($ctxA);
+
+        // El sync scopeó por commerce_id (no tenant_ref).
+        $this->assertDatabaseHas('bancard_saved_cards', [
+            'alias_token' => 'alias_A',
+            'commerce_id' => 'commerce-A',
+        ]);
+
+        // La query per-tenant lo encuentra por esa columna, y aísla de otro comercio.
+        $user = new TestUser();
+        $this->assertSame(1, $user->bancardCardsCount($ctxA));
+        $this->assertSame(0, $user->bancardCardsCount(
+            new BancardTenantContext('pub', 'k', 'production', [], 'commerce-OTHER')
+        ));
+
+        // Nit: el mass-assignment ($fillable dinámico) respeta la columna configurada —
+        // create() con 'commerce_id' NO la descarta (si lo hiciera, quedaría tenant NULL).
+        $mass = SavedCard::create([
+            'user_type' => 'test-user',
+            'user_id' => 2,
+            'alias_token' => 'alias_mass',
+            'commerce_id' => 'commerce-A',
+        ]);
+        $this->assertSame('commerce-A', $mass->fresh()->commerce_id);
     }
 
     public function test_set_as_default_single_tenant_desmarca_las_demas(): void

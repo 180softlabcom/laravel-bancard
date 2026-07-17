@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.1.0] - 2026-07-17
+
+> Cierra en **código** el último eslabón de H2 (replay/doble-procesamiento): la idempotencia del webhook deja de depender de `persist_transactions` (y de la disciplina del listener del consumidor) y pasa a ser un guard **siempre-activo** del paquete. Alineado con el objetivo de que el paquete sea la única forma segura de usar Bancard, sin forzar el modelo de datos completo.
+
+### Added
+- **Idempotencia siempre-activa e inyectable (`BancardIdempotencyStore`).** El webhook deduplica el `shop_process_id` de forma **atómica en todos los casos**, independiente de `persist_transactions`: un reenvío de vPOS o un replay se acusa `duplicate` sin re-despachar. Antes el dedup vivía en `bancard_transactions` (solo con `persist_transactions=true`), así que un consumidor con `persist=false` quedaba sin guard salvo que su listener fuera idempotente — eso ya no aplica. Default `EloquentIdempotencyStore` (nueva tabla `bancard_processed_callbacks`, `php artisan migrate`); **inyectable** vía `bancard.idempotency_store` (Redis, tabla propia, etc.).
+- **El charge valida sin `persist_transactions`.** El `alias_token` con el que se firma el token del webhook de charge (Bancard no lo manda en el callback) ahora lo guarda el store **al cobrar**, así que el modo `token` valida el charge aun con `persist_transactions=false` (antes requería la tabla de transacciones).
+
+### Fixed
+- **Columna de tenant configurable + mass-assignment (`SavedCard`).** `$fillable` hardcodeaba `tenant_ref`; un consumidor que apunta `bancard.saved_cards_tenant_column` a otra columna (p.ej. `commerce_id`) y usa `create()`/`fill()` la perdía **en silencio** → tarjeta con tenant NULL (fuga cross-tenant). Ahora la columna configurada se agrega dinámicamente a `$fillable`. Nuevo test del path con columna ≠ `tenant_ref`.
+
+### Migración
+- **Nueva migración** `create_bancard_processed_callbacks_table`. Corré `php artisan migrate`. Es aditiva y no-breaking: single-tenant y multi-tenant siguen igual, solo suman el guard de idempotencia.
+
+### Notes
+- 41 tests, 5118 assertions.
+
 ## [2.0.1] - 2026-07-17
 
 > Endurecimiento tras una revisión adversarial (red-team) de un agente consumidor. Un fix de seguridad en el código; el resto endurece la documentación para consumidores.

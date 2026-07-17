@@ -3,6 +3,8 @@
 namespace Softlab180\Bancard;
 
 use Illuminate\Support\ServiceProvider;
+use Softlab180\Bancard\Contracts\BancardIdempotencyStore;
+use Softlab180\Bancard\Idempotency\EloquentIdempotencyStore;
 use Softlab180\Bancard\Services\BancardVPOSService;
 
 class BancardServiceProvider extends ServiceProvider
@@ -26,6 +28,18 @@ class BancardServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(BancardVPOSService::class, 'bancard');
+
+        // Store de idempotencia del webhook (dedup + alias_token del charge), inyectable
+        // vía bancard.idempotency_store. Default: Eloquent (bancard_processed_callbacks).
+        $this->app->singleton(BancardIdempotencyStore::class, function ($app) {
+            $store = config('bancard.idempotency_store');
+
+            if (is_string($store) && $store !== '') {
+                return $app->make($store);
+            }
+
+            return new EloquentIdempotencyStore();
+        });
     }
 
     /**

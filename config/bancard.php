@@ -126,6 +126,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Idempotency Store (dedup del webhook, independiente de persist_transactions)
+    |--------------------------------------------------------------------------
+    |
+    | La idempotencia del webhook (deduplicar un callback reenviado por vPOS o un
+    | replay) es SIEMPRE activa, no depende de persist_transactions: el paquete
+    | reclama atómicamente cada shop_process_id antes de despachar el evento, y guarda
+    | el alias_token del charge para poder validarlo sin la tabla de transacciones
+    | completa. Así un consumidor con persist_transactions=false igual queda protegido
+    | contra el doble-procesamiento (no necesita idempotencia propia en su listener).
+    |
+    | Valor: class-string (o instancia) que implemente
+    | Softlab180\Bancard\Contracts\BancardIdempotencyStore. Si es null, se usa el
+    | EloquentIdempotencyStore (tabla bancard_processed_callbacks; requiere migrar).
+    | Enchufá el tuyo (Redis, tu propia tabla) apuntando esta config.
+    |
+    */
+    'idempotency_store' => env('BANCARD_IDEMPOTENCY_STORE'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Tenant Resolver (multi-tenant)
     |--------------------------------------------------------------------------
     |
@@ -148,8 +168,9 @@ return [
     |--------------------------------------------------------------------------
     |
     | Cómo el webhook confirma que un callback es genuino:
-    | - 'token'   (default): valida la firma MD5 del payload (para charge necesita
-    |             el alias_token → persist_transactions=true).
+    | - 'token'   (default): valida la firma MD5 del payload. El alias_token del charge
+    |             (que Bancard no manda en el callback) lo recupera del idempotency_store,
+    |             así que ya NO requiere persist_transactions=true.
     | - 'requery': ignora el payload y re-consulta el estado autoritativo a Bancard
     |             (getPaymentConfirmation) bajo el tenant. Zero-trust sobre el estado;
     |             no requiere guardar el alias_token. Corre DENTRO del request del
