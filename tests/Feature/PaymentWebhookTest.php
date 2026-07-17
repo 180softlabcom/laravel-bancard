@@ -176,4 +176,18 @@ class PaymentWebhookTest extends TestCase
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
     }
+
+    public function test_un_listener_sincronico_que_lanza_no_convierte_el_webhook_en_500(): void
+    {
+        // SIN Event::fake: registramos un listener REAL que lanza, para ejercitar el
+        // try/catch del dispatch. El pago ya quedó reclamado; un listener que revienta
+        // NO debe perder el ack (500 → vPOS da la confirmación por perdida). Debe ser 200.
+        Event::listen(PaymentSucceeded::class, function () {
+            throw new \RuntimeException('listener boom');
+        });
+
+        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('00', 'S'));
+
+        $res->assertOk()->assertJson(['status' => 'success']);
+    }
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0] - 2026-07-17
+
+### Added
+- **Soporte multi-tenant en el webhook (Front 1a).** El webhook resuelve, por `shop_process_id`, QUÉ comercio es dueño de cada callback y valida el token con **SUS** llaves (no las globales del singleton). Config `bancard.tenant_resolver` (class-string o instancia de `Softlab180\Bancard\Tenancy\BancardTenantResolver`); sin resolver configurado usa el `GlobalTenantResolver` (llaves globales) → **single-tenant sin cambios**. Los eventos `PaymentSucceeded`/`PaymentFailed` ganan `tenantRef`. Cierra el bloqueo estructural que obligaba a los proyectos multi-comercio a rodar su propio webhook. Ver `docs/multi-tenant.md`.
+- **Modo de verificación `requery` (opt-in).** `bancard.webhook_verification='requery'`: en vez de validar la firma del payload, re-consulta el estado autoritativo a Bancard (`getPaymentConfirmation`) bajo el tenant resuelto. Zero-trust sobre el estado; **no requiere** guardar el `alias_token` (desacopla el charge webhook de `persist_transactions`). Timeout acotado (`webhook_requery_timeout`, default 8s, <30s) con fail-safe a *pending*.
+
+### Security
+- **Webhook de catastro DESHABILITADO por default.** `/webhooks/bancard/card-registration` no está autenticado (la fórmula del token de `cards/new` no está en la spec) y el catastro **no tiene** webhook estándar servidor-a-servidor. Procesarlo permitía **escrituras de tarjeta no autenticadas** (asociar un `alias_token` arbitrario a un `user_id`) y disparar `CardRegistered`. Ahora, por default, acusa 200 **sin procesar**. **⚠️ Potencialmente breaking:** si una integración no estándar usa ese webhook, activá `BANCARD_CARD_REGISTRATION_WEBHOOK=true` y protegé el endpoint con tu propia autenticación (IP allow-list / firma). El flujo recomendado sigue siendo `syncBancardCards()`.
+- **Fail-closed ante private key vacía:** la validación de token rechaza si no hay secreto configurado (una llave vacía haría el token forjable con datos públicos).
+- Un **listener síncrono que lanza** ya no convierte el webhook en HTTP 500 (se loguea y se acusa 200, para no perder el ack).
+
+### Notes
+- Verificado con **dos pasadas de revisión adversarial multi-agente** (12 + 1 hallazgos, todos resueltos). 34 tests, 5104 assertions.
+
 ## [1.2.6] - 2026-07-14
 
 ### Fixed

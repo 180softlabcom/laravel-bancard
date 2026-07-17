@@ -126,6 +126,42 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Tenant Resolver (multi-tenant)
+    |--------------------------------------------------------------------------
+    |
+    | Resolver de comercio para el webhook ENTRANTE. En multi-tenant cada comercio
+    | tiene sus propias llaves; el token de cada callback se firmó con la llave de
+    | ese comercio, así que el webhook debe resolver QUÉ comercio es (por
+    | shop_process_id) y validar con SUS llaves — no con las globales.
+    |
+    | Valor: class-string (o instancia) que implemente
+    | Softlab180\Bancard\Tenancy\BancardTenantResolver. Si es null, se usa el
+    | GlobalTenantResolver (llaves globales) → el comportamiento single-tenant NO
+    | cambia. Ver docs/multi-tenant.md.
+    |
+    */
+    'tenant_resolver' => env('BANCARD_TENANT_RESOLVER'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Webhook Verification Mode
+    |--------------------------------------------------------------------------
+    |
+    | Cómo el webhook confirma que un callback es genuino:
+    | - 'token'   (default): valida la firma MD5 del payload (para charge necesita
+    |             el alias_token → persist_transactions=true).
+    | - 'requery': ignora el payload y re-consulta el estado autoritativo a Bancard
+    |             (getPaymentConfirmation) bajo el tenant. Zero-trust sobre el estado;
+    |             no requiere guardar el alias_token. Corre DENTRO del request del
+    |             webhook, que debe acusar en <30s: usa webhook_requery_timeout y, si
+    |             la consulta falla/timeoutea, acusa 200 + deja la orden pending.
+    |
+    */
+    'webhook_verification' => env('BANCARD_WEBHOOK_VERIFICATION', 'token'),
+    'webhook_requery_timeout' => (int) env('BANCARD_WEBHOOK_REQUERY_TIMEOUT', 8),
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto Save Cards
     |--------------------------------------------------------------------------
     |
@@ -133,6 +169,22 @@ return [
     |
     */
     'auto_save_cards' => env('BANCARD_AUTO_SAVE_CARDS', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Card Registration Webhook (deshabilitado por default — seguridad)
+    |--------------------------------------------------------------------------
+    |
+    | El catastro NO tiene webhook estándar servidor-a-servidor (el flujo correcto es
+    | el iframe + syncBancardCards()). El endpoint /webhooks/bancard/card-registration
+    | NO está autenticado (la fórmula del token de cards/new no está en la spec), así
+    | que procesarlo permitiría escrituras de tarjeta no autenticadas. Por eso está
+    | DESHABILITADO por default: acusa 200 y no procesa. Actívalo solo si tenés una
+    | integración no estándar que lo requiera, y protegé el endpoint con tu propia
+    | autenticación (IP allow-list / firma) vía bancard.webhook.middleware.
+    |
+    */
+    'card_registration_webhook_enabled' => env('BANCARD_CARD_REGISTRATION_WEBHOOK', false),
 
     /*
     |--------------------------------------------------------------------------
