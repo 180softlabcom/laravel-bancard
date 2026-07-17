@@ -5,6 +5,7 @@ namespace Softlab180\Bancard\Tests\Feature;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
+use Softlab180\Bancard\Contracts\BancardIdempotencyStore;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
 use Softlab180\Bancard\Models\BancardTransaction;
@@ -161,6 +162,45 @@ class PaymentWebhookTest extends TestCase
 
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
+    }
+
+    public function test_callback_duplicado_se_deduplica_aunque_persist_transactions_este_off(): void
+    {
+        // H2: la idempotencia YA NO depende de persist_transactions. Un reenvío de vPOS
+        // (o un replay de un callback capturado) se deduplica en el idempotency_store, aun
+        // sin la tabla bancard_transactions. Antes, con persist=false, no había dedup y la
+        // seguridad quedaba en el listener del consumidor.
+        config(['bancard.persist_transactions' => false]);
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        $payload = $this->payload('00', 'S');
+        $this->postJson('/webhooks/bancard/confirmation', $payload)->assertOk();
+        $this->postJson('/webhooks/bancard/confirmation', $payload)
+            ->assertOk()
+            ->assertJson(['duplicate' => true]);
+
+        Event::assertDispatchedTimes(PaymentSucceeded::class, 1);
+    }
+
+    public function test_charge_valida_con_alias_del_store_aunque_persist_transactions_este_off(): void
+    {
+        // H2/charge: el alias_token del charge no viaja en el callback y, con persist=false,
+        // no hay bancard_transactions. El idempotency_store lo guarda al cobrar, así que el
+        // webhook valida el token del charge igual (desacopla charge de persist_transactions).
+        config(['bancard.persist_transactions' => false]);
+        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
+
+        $alias = 'alias-en-el-store';
+        app(BancardIdempotencyStore::class)->rememberAliasToken($this->shop, $alias);
+
+        $chargeToken = md5($this->priv.$this->shop.'charge'.$this->amount.$this->currency.$alias);
+        // SIN alias_token en el payload (Bancard no lo envía).
+        $payload = $this->payload('00', 'S', token: $chargeToken);
+
+        $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
+
+        $res->assertOk()->assertJson(['status' => 'success']);
+        Event::assertDispatched(PaymentSucceeded::class);
     }
 
     public function test_el_webhook_no_loguea_el_token_en_claro(): void

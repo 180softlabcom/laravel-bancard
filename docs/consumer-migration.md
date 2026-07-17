@@ -15,8 +15,9 @@ El consumidor **borra su `WebhookController` + rutas** y queda con:
 
 ## Prerrequisitos (en orden)
 
-1. **Actualizar a `^2.0.0`** (`composer update softlab180/laravel-bancard`).
-2. **`php artisan migrate`** (columnas `bancard_transactions.alias_token` y `bancard_saved_cards.tenant_ref`).
+1. **Actualizar a `^2.1.0`** (`composer update softlab180/laravel-bancard`).
+2. **`php artisan migrate`** (columnas `bancard_transactions.alias_token`, `bancard_saved_cards.tenant_ref`
+   y la tabla `bancard_processed_callbacks` — el guard de idempotencia siempre-activo de v2.1.0).
 3. **Estar en el generador CSPRNG del `shop_process_id`** (v1.2.6+). El resolver desambigua por
    `shop_process_id`; su **unicidad cross-tenant** la garantiza ese generador. Con el generador
    viejo (`rand()`, 5 dígitos) hay riesgo bajo-pero-real de colisión entre comercios → el resolver
@@ -93,18 +94,16 @@ al iniciar el pago.
   duplicada) además de tu `commerce_id`.
 
 > ⚠️ **Seguridad — replay / idempotencia.** El token de Bancard autentica que el mensaje **vino de
-> Bancard**, pero **no firma** `response`/`response_code`. Por eso la protección contra "marcar
-> pagado indebidamente" es la **idempotencia** (o el modo `requery`). Elegí una de estas config
-> **seguras**:
-> - **`persist_transactions=true` (default):** el paquete deduplica el `shop_process_id` de forma
->   atómica → un reenvío se acusa `duplicate` sin re-despachar. **Recomendado si no tenés dedup propio.**
+> Bancard**, pero **no firma** `response`/`response_code`. Desde **v2.1.0** el paquete **deduplica el
+> `shop_process_id` de forma atómica SIEMPRE** (el `idempotency_store`, independiente de
+> `persist_transactions`): un reenvío de vPOS o un replay se acusa `duplicate` sin re-despachar. **No
+> necesitás idempotencia propia en tu listener** — el guard vive en el paquete, no en tu disciplina.
+> Dos capas **opcionales** encima:
 > - **`webhook_verification=requery`:** el webhook **ignora el payload** y re-consulta el estado real
->   a Bancard → inmune a un payload forjado (aunque un atacante tuviera un token válido). **La opción
->   más fuerte.** No requiere `persist_transactions`.
-> - **`persist_transactions=false` + `token`:** el paquete **no deduplica** → la idempotencia queda
->   **enteramente en tu listener**, que DEBE deduplicar por `shop_process_id` en **cualquier**
->   resultado (no solo "paid"): un `single_buy` declinado reenviado como `S` NO debe marcar pagado.
->   Solo usá esta combinación si tu listener cumple eso.
+>   a Bancard → inmune incluso a un payload **forjado** con token válido. **La opción zero-trust.**
+> - **`persist_transactions=true` (default):** además guarda la transacción completa
+>   (`bancard_transactions`) para conciliación. Con `false`, **la dedup sigue activa** — solo no
+>   guardás la fila de negocio (el charge igual valida: el `alias_token` lo guarda el store al cobrar).
 >
 > En cualquier caso: el webhook **debe** ir sobre **HTTPS** (el token es una credencial por transacción).
 
@@ -119,9 +118,9 @@ Event::listen(PaymentSucceeded::class, function (PaymentSucceeded $e) {
     // $e->response['confirmation'] -> confirmación CRUDA (incluye card_masked_number/card_brand
     //   del single_buy, security_information/risk_index, amount, currency, extended_response_description...)
 
-    // IDEMPOTENCIA: con persist_transactions=false, el guard va ACÁ (único dedup de tu fila).
-    //   ej.: si el Payment ya está 'paid' o marcado (merchant_notified_at), return.
-    // Luego: markAsPaid + tu fulfillment. Ideal: listener ENCOLADO e idempotente.
+    // IDEMPOTENCIA: el paquete YA deduplica el shop_process_id (no se re-despacha un
+    //   reenvío). Igual conviene que markAsPaid sea idempotente como defensa en profundidad
+    //   de TUS efectos (fulfillment, ledger). Ideal: listener ENCOLADO e idempotente.
 });
 
 Event::listen(PaymentFailed::class, function (PaymentFailed $e) {
@@ -168,10 +167,10 @@ tiempo hasta el paso 6.
 Con el webhook casero **borrado**, un E2E contra **comercio A (llaves ≠ global)** debe:
 
 - `single_buy` y `charge` **validan** y marcan pagado **vía listener**;
-- un **replay** se deduplica (por tu idempotencia en el listener);
+- un **replay** se deduplica (por el guard del paquete, **aun con `persist_transactions=false`**);
 - un **callback forjado** se rechaza;
 - un `shop_process_id` **desconocido** → HTTP 200 sin procesar;
-- **sin una línea de seguridad casera**, con `persist_transactions=false`.
+- **sin una línea de seguridad ni de idempotencia casera**, con `persist_transactions=false`.
 
 ## Secuencia recomendada
 

@@ -5,6 +5,7 @@ namespace Softlab180\Bancard\Services;
 use Exception;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Softlab180\Bancard\Contracts\BancardIdempotencyStore;
 use Softlab180\Bancard\Contracts\Payable;
 use Softlab180\Bancard\Exceptions\BancardException;
 use Softlab180\Bancard\Models\BancardTransaction;
@@ -787,6 +788,17 @@ class BancardVPOSService
      */
     protected function recordTransaction(Payable $payable, string $shopProcessId, ?string $processId, string $amount, string $currency, string $type, ?string $aliasToken = null): void
     {
+        // Idempotencia: registrar el alias_token del charge SIEMPRE (aun con
+        // persist_transactions=false), para poder validar el token del webhook de charge
+        // sin la tabla de transacciones completa. Best-effort: nunca bloquea el cobro.
+        if ($aliasToken !== null && $aliasToken !== '') {
+            try {
+                app(BancardIdempotencyStore::class)->rememberAliasToken($shopProcessId, $aliasToken);
+            } catch (\Throwable $e) {
+                // ignorado a propósito: el store es best-effort en el camino de cobro
+            }
+        }
+
         if (config('bancard.persist_transactions', true)) {
             try {
                 BancardTransaction::updateOrCreate(
