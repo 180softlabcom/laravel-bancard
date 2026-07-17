@@ -70,7 +70,7 @@ class MultiTenantWebhookTest extends TestCase
         $this->useCommerceAResolver();
 
         $token = md5($this->commerceAKey.$this->shop.'confirm'.$this->amount.$this->currency);
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload($token));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload($token));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class, fn ($e) => $e->tenantRef === 'commerce-A');
@@ -85,7 +85,7 @@ class MultiTenantWebhookTest extends TestCase
         $this->useCommerceAResolver();
 
         $tokenConGlobal = md5('GLOBAL_PRIVATE_KEY'.$this->shop.'confirm'.$this->amount.$this->currency);
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload($tokenConGlobal));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload($tokenConGlobal));
 
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
@@ -98,7 +98,7 @@ class MultiTenantWebhookTest extends TestCase
         // Resolver vacío → null para cualquier shop_process_id.
         config(['bancard.tenant_resolver' => new ArrayTenantResolver([])]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('cualquier_token'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('cualquier_token'));
 
         $res->assertOk()->assertJson(['status' => 'success', 'unresolved' => true]);
         Event::assertNotDispatched(PaymentSucceeded::class);
@@ -112,7 +112,7 @@ class MultiTenantWebhookTest extends TestCase
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
         config(['bancard.tenant_resolver' => new ArrayTenantResolver([], throws: true)]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('cualquier_token'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('cualquier_token'));
 
         $res->assertOk()->assertJson(['status' => 'success', 'unresolved' => true]);
         Event::assertNotDispatched(PaymentSucceeded::class);
@@ -132,7 +132,7 @@ class MultiTenantWebhookTest extends TestCase
             'card_brand' => 'MasterCard',
         ]);
 
-        $this->postJson('/webhooks/bancard/payment', $payload)->assertOk();
+        $this->postJson('/webhooks/bancard/confirmation', $payload)->assertOk();
 
         Event::assertDispatched(
             PaymentSucceeded::class,
@@ -162,7 +162,7 @@ class MultiTenantWebhookTest extends TestCase
             ]),
         ]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('token_basura_ignorado'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('token_basura_ignorado'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class, fn ($e) => $e->tenantRef === 'commerce-A');
@@ -180,7 +180,7 @@ class MultiTenantWebhookTest extends TestCase
         $this->useCommerceAResolver('commerce-A');
 
         $token = md5($this->commerceAKey.$this->shop.'confirm'.$this->amount.$this->currency);
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload($token, '05', 'N'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload($token, '05', 'N'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentFailed::class, fn ($e) => $e->tenantRef === 'commerce-A' && $e->errorCode === '05');
@@ -200,16 +200,16 @@ class MultiTenantWebhookTest extends TestCase
             ]),
         ]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('token_ignorado'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('token_ignorado'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentFailed::class, fn ($e) => $e->tenantRef === 'commerce-A');
         Event::assertNotDispatched(PaymentSucceeded::class);
     }
 
-    public function test_charge_por_ruta_charge_valida_con_la_llave_del_comercio(): void
+    public function test_charge_valida_con_la_llave_del_comercio(): void
     {
-        // La ruta real /webhooks/bancard/charge, multi-tenant, con fórmula charge + alias.
+        // Fórmula "charge" (token + alias) por el webhook único, multi-tenant.
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
         $this->useCommerceAResolver();
 
@@ -217,7 +217,7 @@ class MultiTenantWebhookTest extends TestCase
         $token = md5($this->commerceAKey.$this->shop.'charge'.$this->amount.$this->currency.$alias);
         $payload = $this->payload($token, extra: ['alias_token' => $alias]);
 
-        $res = $this->postJson('/webhooks/bancard/charge', $payload);
+        $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class, fn ($e) => $e->tenantRef === 'commerce-A');
@@ -233,27 +233,11 @@ class MultiTenantWebhookTest extends TestCase
             '*/vpos/api/0.3/single_buy/confirmations' => Http::response(['status' => 'error'], 500),
         ]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('token_ignorado'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('token_ignorado'));
 
         $res->assertOk()->assertJson(['status' => 'success', 'pending' => true]);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
 
-    public function test_charge_en_ruta_payment_valida_con_la_llave_del_comercio(): void
-    {
-        // Bancard usa una sola URL: un charge (fórmula "charge" + alias) puede caer por
-        // /payment y debe validar con la llave del comercio resuelto y el alias del payload.
-        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
-        $this->useCommerceAResolver();
-
-        $alias = 'alias-comercio-A';
-        $token = md5($this->commerceAKey.$this->shop.'charge'.$this->amount.$this->currency.$alias);
-        $payload = $this->payload($token, extra: ['alias_token' => $alias]);
-
-        $res = $this->postJson('/webhooks/bancard/payment', $payload);
-
-        $res->assertOk()->assertJson(['status' => 'success']);
-        Event::assertDispatched(PaymentSucceeded::class);
-    }
 }

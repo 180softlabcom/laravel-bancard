@@ -17,15 +17,10 @@ use Softlab180\Bancard\Http\Controllers\WebhookController;
 Route::prefix(config('bancard.webhook.route_prefix', 'webhooks/bancard'))
     ->middleware(config('bancard.webhook.middleware', []))
     ->group(function () {
-        // Payment confirmation webhook (Single Buy)
-        Route::post('/payment', [WebhookController::class, 'handlePayment'])
-            ->name('bancard.webhook.payment');
-
-        // Card registration webhook (Zimple/Cards)
-        Route::post('/card-registration', [WebhookController::class, 'handleCardRegistration'])
-            ->name('bancard.webhook.card-registration');
-
-        // Charge with token webhook (3DS confirmation)
-        Route::post('/charge', [WebhookController::class, 'handleChargeWithToken'])
-            ->name('bancard.webhook.charge');
+        // UN SOLO webhook. Bancard usa una única "URL de confirmación" (la que cargás en
+        // el portal de comercios) y por ahí llegan AMBOS tipos de callback: pago ocasional
+        // (single_buy) y pago con token/3DS (charge). No hay webhooks separados por tipo.
+        // El catastro NO tiene webhook: es local (iframe + syncBancardCards()).
+        Route::post('/confirmation', [WebhookController::class, 'handleConfirmation'])
+            ->name('bancard.webhook.confirmation');
     });

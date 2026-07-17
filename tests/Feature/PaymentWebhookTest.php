@@ -50,7 +50,7 @@ class PaymentWebhookTest extends TestCase
     {
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('00', 'S'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class);
@@ -62,7 +62,7 @@ class PaymentWebhookTest extends TestCase
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
 
         // El token sigue siendo válido (no depende del response_code).
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('05', 'N'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('05', 'N'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentFailed::class);
@@ -73,7 +73,7 @@ class PaymentWebhookTest extends TestCase
     {
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('00', 'S', token: 'token_falsificado'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S', token: 'token_falsificado'));
 
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
@@ -85,35 +85,20 @@ class PaymentWebhookTest extends TestCase
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
 
         $payload = $this->payload('00', 'S');
-        $this->postJson('/webhooks/bancard/payment', $payload)->assertOk();
+        $this->postJson('/webhooks/bancard/confirmation', $payload)->assertOk();
         // Reenvío del MISMO callback (vPOS puede reenviar): no debe re-disparar.
-        $this->postJson('/webhooks/bancard/payment', $payload)
+        $this->postJson('/webhooks/bancard/confirmation', $payload)
             ->assertOk()
             ->assertJson(['duplicate' => true]);
 
         Event::assertDispatchedTimes(PaymentSucceeded::class, 1);
     }
 
-    public function test_single_buy_aprobado_en_ruta_charge_no_se_rechaza(): void
+    public function test_charge_con_alias_en_el_payload_se_acepta(): void
     {
-        // Bug real: Bancard usa UNA sola "URL de confirmación". Si el portal apunta
-        // a /charge, la confirmación de un single_buy (token "confirm", SIN
-        // alias_token) caía en handleChargeWithToken, se validaba solo con la
-        // fórmula "charge" → no coincidía → "rejected", sin disparar el evento y con
-        // la orden impaga pese al cobro. Debe aceptarse por la fórmula "confirm".
-        Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
-
-        $res = $this->postJson('/webhooks/bancard/charge', $this->payload('00', 'S'));
-
-        $res->assertOk()->assertJson(['status' => 'success']);
-        Event::assertDispatched(PaymentSucceeded::class);
-        Event::assertNotDispatched(PaymentFailed::class);
-    }
-
-    public function test_charge_aprobado_en_ruta_payment_no_se_rechaza(): void
-    {
-        // Caso inverso: si el portal apunta a /payment, un charge/3DS (token
-        // "charge" + alias_token) también debe aceptarse.
+        // El webhook ÚNICO acepta también la fórmula "charge" (token firmado con el
+        // alias_token, que acá viaja en el payload). Bancard postea single_buy y charge
+        // a la misma URL de confirmación.
         Event::fake([PaymentSucceeded::class, PaymentFailed::class]);
 
         $alias = 'alias-abc-123';
@@ -121,7 +106,7 @@ class PaymentWebhookTest extends TestCase
         $payload = $this->payload('00', 'S', token: $chargeToken);
         $payload['operation']['alias_token'] = $alias;
 
-        $res = $this->postJson('/webhooks/bancard/payment', $payload);
+        $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class);
@@ -148,7 +133,7 @@ class PaymentWebhookTest extends TestCase
         // NB: SIN alias_token en el payload (Bancard no lo envía).
         $payload = $this->payload('00', 'S', token: $chargeToken);
 
-        $res = $this->postJson('/webhooks/bancard/charge', $payload);
+        $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
 
         $res->assertOk()->assertJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class);
@@ -171,7 +156,7 @@ class PaymentWebhookTest extends TestCase
         $chargeToken = md5($this->priv.$this->shop.'charge'.$this->amount.$this->currency.'alias-DISTINTO');
         $payload = $this->payload('00', 'S', token: $chargeToken);
 
-        $res = $this->postJson('/webhooks/bancard/charge', $payload);
+        $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
 
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
@@ -186,7 +171,7 @@ class PaymentWebhookTest extends TestCase
             throw new \RuntimeException('listener boom');
         });
 
-        $res = $this->postJson('/webhooks/bancard/payment', $this->payload('00', 'S'));
+        $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S'));
 
         $res->assertOk()->assertJson(['status' => 'success']);
     }

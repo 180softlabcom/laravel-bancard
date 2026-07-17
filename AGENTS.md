@@ -25,18 +25,18 @@ Este archivo es para quien **mantiene** el paquete. Para *usarlo* desde un proye
 10. **`shop_process_id` NUNCA empieza con 0.** Bancard lo devuelve como **número JSON** en el webhook, lo que descarta el cero inicial → el token recalculado no coincide (`Invalid token`, pago aprobado rechazado) y falla el lookup. `generateShopProcessId()` garantiza primer dígito 1-9. Test: `test_shop_process_id_es_numerico_de_15_digitos_sin_cero_inicial_y_no_colisiona`. Mantené 15 dígitos (< 2^53, entra en el rango seguro de enteros JSON).
 11. **El token del webhook de charge se valida con el `alias_token` guardado, no con el del payload.** El callback de charge se firma con el `alias_token`, que Bancard **no manda** en el payload. El paquete lo persiste al cobrar (`bancard_transactions.alias_token`) y lo recupera por `shop_process_id` en el `WebhookController` (`lookupAliasToken()` → `validateConfirmationToken($op, $alias)`). Requiere `persist_transactions=true`. Tests: `test_charge_valida_con_alias_token_guardado_cuando_no_viene_en_el_payload`.
 12. **`getPaymentConfirmation()` (single_buy/confirmations) sirve para single_buy Y charge.** Es una *operación común a ambos flujos* (spec pág. 44/55) y **no hay endpoint de confirmación específico para charge**. No agregues uno ni reenrutes la conciliación de charges: un `BuyNotFound` al conciliar un charge es, casi siempre, el bug del cero inicial en `shop_process_id` (ver regla 10), no un problema de endpoint.
-13. **El webhook valida PER-TENANT, nunca contra el singleton global.** El `WebhookController` resuelve el comercio (`tenant_resolver` → `BancardTenantContext`) y construye el service con `BancardVPOSService::forContext($ctx)`; TODA validación/consulta (token o requery) corre sobre esa instancia. **Nunca** uses `Bancard::` ni `app('bancard')` en el path del webhook (validaría con la llave global y rechazaría a todos los comercios ≠ global). El E2E `MultiTenantWebhookTest` (llaves ≠ global) lo prueba de raíz. Default sin resolver = `GlobalTenantResolver` (llaves globales, single-tenant intacto). El **webhook de catastro** está deshabilitado por default (no autenticado; ver regla siguiente). Diseño: `docs/multi-tenant.md`.
+13. **El webhook valida PER-TENANT, nunca contra el singleton global.** El `WebhookController` resuelve el comercio (`tenant_resolver` → `BancardTenantContext`) y construye el service con `BancardVPOSService::forContext($ctx)`; TODA validación/consulta (token o requery) corre sobre esa instancia. **Nunca** uses `Bancard::` ni `app('bancard')` en el path del webhook (validaría con la llave global y rechazaría a todos los comercios ≠ global). El E2E `MultiTenantWebhookTest` (llaves ≠ global) lo prueba de raíz. Default sin resolver = `GlobalTenantResolver` (llaves globales, single-tenant intacto). **No hay webhook de catastro** (el catastro es local: iframe + `syncBancardCards()`); no reintroduzcas una ruta/handler para eso. Diseño: `docs/multi-tenant.md`.
 
 ## Arquitectura
 
 ```
 src/Services/BancardVPOSService.php   # cliente HTTP + tokens + parsing de webhook (processWebhook)
-src/Http/Controllers/WebhookController.php  # 3 handlers; idempotencia (claimTransaction); responde 200
+src/Http/Controllers/WebhookController.php  # 1 handler (confirmación única, per-tenant); idempotencia; responde 200
 src/Models/BancardTransaction.php     # idempotencia/conciliación (tabla bancard_transactions)
 src/Models/SavedCard.php              # tarjetas catastradas (polimórfico)
 src/Traits/HasBancardCards.php        # API para el modelo de usuario (registrar/sync/charge/delete)
 src/Contracts/Payable.php             # contrato del modelo cobrable
-src/Events/*                          # PaymentSucceeded/Failed, CardRegistered/Deleted
+src/Events/*                          # PaymentSucceeded/Failed
 config/bancard.php · routes/webhooks.php · database/migrations/*
 ```
 

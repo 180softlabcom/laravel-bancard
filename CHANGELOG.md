@@ -1,18 +1,23 @@
 # Changelog
 
-## [1.3.0] - 2026-07-17
+## [2.0.0] - 2026-07-17
+
+> **Corrige el modelo de webhooks de Bancard, que estaba mal.** Bancard tiene **UN solo webhook** (la "URL de confirmación" del portal) por el que llegan single_buy **y** charge/3DS; **no** hay webhooks separados por tipo ni webhook de catastro. El paquete modelaba de más (3 rutas). Es breaking por eso, aunque en la práctica los consumidores actuales no usan estas rutas (rodaron su propio webhook). Ver `docs/multi-tenant.md`.
 
 ### Added
-- **Soporte multi-tenant en el webhook (Front 1a).** El webhook resuelve, por `shop_process_id`, QUÉ comercio es dueño de cada callback y valida el token con **SUS** llaves (no las globales del singleton). Config `bancard.tenant_resolver` (class-string o instancia de `Softlab180\Bancard\Tenancy\BancardTenantResolver`); sin resolver configurado usa el `GlobalTenantResolver` (llaves globales) → **single-tenant sin cambios**. Los eventos `PaymentSucceeded`/`PaymentFailed` ganan `tenantRef`. Cierra el bloqueo estructural que obligaba a los proyectos multi-comercio a rodar su propio webhook. Ver `docs/multi-tenant.md`.
-- **Modo de verificación `requery` (opt-in).** `bancard.webhook_verification='requery'`: en vez de validar la firma del payload, re-consulta el estado autoritativo a Bancard (`getPaymentConfirmation`) bajo el tenant resuelto. Zero-trust sobre el estado; **no requiere** guardar el `alias_token` (desacopla el charge webhook de `persist_transactions`). Timeout acotado (`webhook_requery_timeout`, default 8s, <30s) con fail-safe a *pending*.
+- **Soporte multi-tenant en el webhook (Front 1a).** El webhook resuelve, por `shop_process_id`, QUÉ comercio es dueño de cada callback y valida el token con **SUS** llaves (no las globales del singleton). Config `bancard.tenant_resolver` (class-string o instancia de `Softlab180\Bancard\Tenancy\BancardTenantResolver`); sin resolver configurado usa el `GlobalTenantResolver` (llaves globales) → **single-tenant sin cambios de comportamiento**. Los eventos `PaymentSucceeded`/`PaymentFailed` ganan `tenantRef`. Cierra el bloqueo estructural que obligaba a los proyectos multi-comercio a rodar su propio webhook.
+- **Modo de verificación `requery` (opt-in).** `bancard.webhook_verification='requery'`: en vez de validar la firma del payload, re-consulta el estado autoritativo a Bancard (`getPaymentConfirmation`) bajo el tenant resuelto. Zero-trust sobre el estado; **no requiere** guardar el `alias_token` (desacopla el charge de `persist_transactions`). Timeout acotado (`webhook_requery_timeout`, default 8s, <30s) con fail-safe a *pending*.
+
+### Changed / Removed (breaking)
+- **UN solo webhook: `POST /webhooks/bancard/confirmation`.** Las rutas `/payment` y `/charge` (con `handlePayment`/`handleChargeWithToken`) se **colapsaron** en una sola ruta y handler (`handleConfirmation`), porque Bancard usa una única URL de confirmación para ambos flujos. **⚠️ Migración:** en el portal de Bancard, apuntá la URL de confirmación a `.../webhooks/bancard/confirmation`.
+- **Eliminado el webhook de catastro (código muerto).** Bancard **no** envía webhook de catastro (es local: iframe + `syncBancardCards()`). Se removieron la ruta `/card-registration`, el handler `handleCardRegistration`, el evento `CardRegistered` y los config `auto_save_cards` / `card_registration_webhook_enabled`. **⚠️ Migración:** el catastro se persiste con `syncBancardCards()` tras el `add_new_card_success` del iframe.
 
 ### Security
-- **Webhook de catastro DESHABILITADO por default.** `/webhooks/bancard/card-registration` no está autenticado (la fórmula del token de `cards/new` no está en la spec) y el catastro **no tiene** webhook estándar servidor-a-servidor. Procesarlo permitía **escrituras de tarjeta no autenticadas** (asociar un `alias_token` arbitrario a un `user_id`) y disparar `CardRegistered`. Ahora, por default, acusa 200 **sin procesar**. **⚠️ Potencialmente breaking:** si una integración no estándar usa ese webhook, activá `BANCARD_CARD_REGISTRATION_WEBHOOK=true` y protegé el endpoint con tu propia autenticación (IP allow-list / firma). El flujo recomendado sigue siendo `syncBancardCards()`.
 - **Fail-closed ante private key vacía:** la validación de token rechaza si no hay secreto configurado (una llave vacía haría el token forjable con datos públicos).
 - Un **listener síncrono que lanza** ya no convierte el webhook en HTTP 500 (se loguea y se acusa 200, para no perder el ack).
 
 ### Notes
-- Verificado con **dos pasadas de revisión adversarial multi-agente** (12 + 1 hallazgos, todos resueltos). 34 tests, 5104 assertions.
+- Verificado con **dos pasadas de revisión adversarial multi-agente**. 30 tests.
 
 ## [1.2.6] - 2026-07-14
 

@@ -57,7 +57,6 @@ BANCARD_PERSIST_TRANSACTIONS=true      # registra cada operación para idempoten
 BANCARD_CHECKOUT_SCRIPT_VERSION=4.0.0  # versión del SDK JS de checkout
 BANCARD_ENABLE_3DS=false               # 3DS en charge (opt-in): requiere que Bancard habilite el producto 3DS al comercio
 BANCARD_USER_MODEL="App\\Models\\User"
-BANCARD_CARD_REGISTRATION_WEBHOOK=false # webhook de catastro (default off por seguridad; usá syncBancardCards())
 # Multi-tenant (ver docs/multi-tenant.md):
 BANCARD_TENANT_RESOLVER=               # class-string de BancardTenantResolver; vacío = single-tenant (llaves globales)
 BANCARD_WEBHOOK_VERIFICATION=token     # token | requery (requery = re-consulta el estado a Bancard, zero-trust)
@@ -117,7 +116,7 @@ En el frontend, renderizá el iframe con el SDK de Bancard (el `process_id` NO v
 
 #### 3DS en el pago ocasional
 
-El 3DS del single buy es **totalmente transparente**: se sigue usando **`Bancard.Checkout.createForm`** — **no** hay cambio de método. Si el comercio está enrolado en 3DS del lado de Bancard y la tarjeta lo exige, el desafío se renderiza **dentro del mismo iframe de `Checkout`**; el comercio no toca nada. La llamada `single_buy`, el `process_id` y el `checkout_js_url` son idénticos con o sin 3DS, y el resultado llega igual al webhook `POST /webhooks/bancard/payment` (con `security_information` → `risk_index`, etc.).
+El 3DS del single buy es **totalmente transparente**: se sigue usando **`Bancard.Checkout.createForm`** — **no** hay cambio de método. Si el comercio está enrolado en 3DS del lado de Bancard y la tarjeta lo exige, el desafío se renderiza **dentro del mismo iframe de `Checkout`**; el comercio no toca nada. La llamada `single_buy`, el `process_id` y el `checkout_js_url` son idénticos con o sin 3DS, y el resultado llega igual al webhook `POST /webhooks/bancard/confirmation` (con `security_information` → `risk_index`, etc.).
 
 > ⚠️ **No uses `Bancard.Charge3DS.createForm` para single_buy.** Ese método es exclusivo del **pago con token (charge)** — ver la sección 5. Para el pago ocasional, `Checkout.createForm` es siempre el método correcto.
 
@@ -128,7 +127,7 @@ El 3DS del single buy es **totalmente transparente**: se sigue usando **`Bancard
 Bancard hace un **POST servidor-a-servidor** a la URL de confirmación que cargás en el panel de comercios de vPOS. Apuntala a la ruta del paquete:
 
 ```
-POST https://miapp.com/webhooks/bancard/payment
+POST https://miapp.com/webhooks/bancard/confirmation
 ```
 
 El paquete valida el token, **responde HTTP 200** (requisito de vPOS: si no recibe 200 en ≤30 s marca la confirmación como inválida) y dispara el evento correspondiente. Vos solo escuchás los eventos (ver más abajo). La idempotencia está cubierta: un callback reenviado no vuelve a disparar el evento.
@@ -182,7 +181,7 @@ A diferencia del pago ocasional, el charge es una llamada servidor-a-servidor **
 </script>
 ```
 
-La confirmación final llega al webhook `POST /webhooks/bancard/charge`.
+La confirmación final llega al webhook único `POST /webhooks/bancard/confirmation`.
 
 > **3DS opcional por comercio (`BANCARD_ENABLE_3DS`).** El request de charge envía `extra_response_attributes: ["confirmation.process_id"]` **solo si `BANCARD_ENABLE_3DS=true`**. Ese parámetro **requiere que Bancard tenga habilitado el producto 3DS** para tu comercio; enviarlo sin ese permiso hace que Bancard **rechace la operación** (con riesgo en producción). Activá el flag únicamente cuando Bancard confirme el enrolamiento 3DS. Con el flag en `false` (default), el charge funciona como pago directo sin 3DS.
 
@@ -203,8 +202,6 @@ Bancard::rollbackPayment($shopProcessId);        // reversar
 
 - `PaymentSucceeded` — pago aprobado (single buy o charge)
 - `PaymentFailed` — pago rechazado
-- `CardRegistered` — tarjeta registrada
-- `CardDeleted` — tarjeta eliminada
 
 ```php
 class HandlePaymentSuccess
@@ -254,11 +251,11 @@ Con `persist_transactions` activo (default), el paquete registra cada operación
 
 ## Webhooks
 
-Rutas registradas automáticamente (prefijo configurable con `bancard.webhook.route_prefix`):
+Bancard usa **UN solo webhook**: una única "URL de confirmación" (la que cargás en el portal de comercios) por la que llegan **ambos** tipos de callback — pago ocasional (single_buy) y pago con token/3DS (charge). El paquete registra esa ruta única (prefijo configurable con `bancard.webhook.route_prefix`):
 
-- `POST /webhooks/bancard/payment` — confirmación de pago (single buy)
-- `POST /webhooks/bancard/charge` — confirmación de pago con token (3DS)
-- `POST /webhooks/bancard/card-registration` — **no estándar**: Bancard no envía webhook de catastro; usá `syncBancardCards()`. Se mantiene solo para integraciones que lo configuren explícitamente.
+- `POST /webhooks/bancard/confirmation` — confirmación de pago (single_buy **y** charge/3DS)
+
+Apuntá la URL de confirmación del portal de Bancard a esa ruta. **El catastro NO tiene webhook** — es local (iframe + `syncBancardCards()`).
 
 Las rutas traen `throttle:60,1` por defecto (`bancard.webhook.middleware`). Excluí el prefijo de CSRF:
 
@@ -275,7 +272,7 @@ protected $except = ['webhooks/bancard/*'];
 ### Logging y seguridad
 
 - **Logging del payload**: por defecto el webhook loguea el payload a nivel `info`. En producción seteá **`BANCARD_LOG_WEBHOOKS=false`** para loguear solo el `shop_process_id`. Desde v1.2.0 ese flag **sí** gatea el log del controller (antes el payload se logueaba igual). El payload de Bancard no trae PAN/CVV, pero es buena higiene.
-- **Ruta de card-registration**: `/webhooks/bancard/card-registration` **no valida token** y el catastro no usa webhook (usá `syncBancardCards()`). Si solo usás single_buy / charge, **no la expongas** (no la cargues en el panel de Bancard) o protegela con IP allow-list.
+- **Validación del token**: el webhook valida la firma MD5 de cada confirmación (fórmula `confirm` o `charge`). En multi-tenant valida con la llave del comercio resuelto (ver `docs/multi-tenant.md`); como capa extra de infra, podés restringir el endpoint a las IPs de Bancard.
 
 ## Testing
 

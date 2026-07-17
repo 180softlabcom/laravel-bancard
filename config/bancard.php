@@ -162,32 +162,6 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Auto Save Cards
-    |--------------------------------------------------------------------------
-    |
-    | Whether to automatically save cards to the database when registered.
-    |
-    */
-    'auto_save_cards' => env('BANCARD_AUTO_SAVE_CARDS', true),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Card Registration Webhook (deshabilitado por default — seguridad)
-    |--------------------------------------------------------------------------
-    |
-    | El catastro NO tiene webhook estándar servidor-a-servidor (el flujo correcto es
-    | el iframe + syncBancardCards()). El endpoint /webhooks/bancard/card-registration
-    | NO está autenticado (la fórmula del token de cards/new no está en la spec), así
-    | que procesarlo permitiría escrituras de tarjeta no autenticadas. Por eso está
-    | DESHABILITADO por default: acusa 200 y no procesa. Actívalo solo si tenés una
-    | integración no estándar que lo requiera, y protegé el endpoint con tu propia
-    | autenticación (IP allow-list / firma) vía bancard.webhook.middleware.
-    |
-    */
-    'card_registration_webhook_enabled' => env('BANCARD_CARD_REGISTRATION_WEBHOOK', false),
-
-    /*
-    |--------------------------------------------------------------------------
     | Frontend URLs
     |--------------------------------------------------------------------------
     |
