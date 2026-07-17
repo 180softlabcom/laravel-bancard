@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.1] - 2026-07-17
+
+> Endurecimiento tras una revisión adversarial (red-team) de un agente consumidor. Un fix de seguridad en el código; el resto endurece la documentación para consumidores.
+
+### Security
+- **El token del webhook ya no se loguea en claro.** `operation.token` es una credencial **reutilizable por transacción** (no depende del resultado): si aparece en los logs, quien lo lea puede forjar un callback "pagado" válido. Ahora se **enmascara** en `logReceived` y en el `catch` de error (`maskedPayload()`), igual que el saliente ya enmascaraba `logRequest`. Test: `test_el_webhook_no_loguea_el_token_en_claro`.
+
+### Docs
+- **Replay / payload forjado (guía de migración).** El token autentica el **origen** pero **no firma** `response`/`response_code`; la protección contra "marcar pagado indebidamente" es la **idempotencia** (o el modo `requery`). `docs/consumer-migration.md` documenta las 3 configuraciones y cuál es segura: `persist_transactions=true` (dedup atómico, default), `webhook_verification=requery` (ignora el payload, inmune a forjado), y `persist=false`+`token` (la idempotencia queda **entera en el listener**, que debe deduplicar por `shop_process_id` en **cualquier** resultado).
+- **Footguns Front 2:** setear `BANCARD_SAVED_CARDS_TENANT_COLUMN` **antes** de `migrate` (si no, columna `tenant_ref` fantasma); aviso prominente de que reapuntar la URL del portal es **breaking** (404 = cobro real, orden impaga); los campos del resolver de ejemplo son **ilustrativos**; el listener de `PaymentFailed` de ejemplo **persiste** la fila fallida con el motivo (`extended_response_description`).
+- **Doc drift en `docs/multi-tenant.md`:** marcado como implementado en v2.0.0 y aclarado que es un release **breaking en superficie** (una sola ruta `/confirmation`, sin `CardRegistered`, sin webhook de catastro, sin `auto_save_cards`); rutas de tipos corregidas a `src/Tenancy`; "no-breaking" aclarado como **comportamiento** single-tenant.
+
 ## [2.0.0] - 2026-07-17
 
 > **Corrige el modelo de webhooks de Bancard, que estaba mal.** Bancard tiene **UN solo webhook** (la "URL de confirmación" del portal) por el que llegan single_buy **y** charge/3DS; **no** hay webhooks separados por tipo ni webhook de catastro. El paquete modelaba de más (3 rutas). Es breaking por eso, aunque en la práctica los consumidores actuales no usan estas rutas (rodaron su propio webhook). Ver `docs/multi-tenant.md`.
