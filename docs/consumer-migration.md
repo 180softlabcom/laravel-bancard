@@ -56,6 +56,11 @@ class OrderTenantResolver implements BancardTenantResolver
 }
 ```
 
+> Los nombres de campo (`bancard_public_key`, `bancard_sandbox`, `bancard_3ds`, `commerce`, …) son
+> **ilustrativos**: mapealos a los reales de tu modelo de comercio. Si apuntás a un campo/relación
+> inexistente, el context se arma con valores vacíos (llave `''` → **fail-closed**, rechaza) o
+> `false` **en silencio** — verificá que resuelvan bien.
+
 Registralo:
 
 ```php
@@ -75,14 +80,33 @@ al iniciar el pago.
 ## Paso 3 — Configurá
 
 - **Portal de Bancard:** apuntá la "URL de confirmación" a `https://tu-app/webhooks/bancard/confirmation`.
-- **`BANCARD_PERSIST_TRANSACTIONS=false`** si tenés tu propia idempotencia (ver paso 4). El webhook
-  de charge en modo `token` necesita el `alias_token`; si no persistís, usá el modo `requery` (abajo).
+  ⚠️ **Es breaking:** las rutas viejas (`/payment`, `/charge`) ya NO existen en v2.0.0. Si no
+  reapuntás el portal, los callbacks pegan **404** → cobro real, orden **impaga**.
 - **`BANCARD_WEBHOOK_VERIFICATION`** — `token` (default, valida la firma MD5) o **`requery`**
   (re-consulta el estado autoritativo a Bancard bajo el tenant; zero-trust, **no** requiere guardar
   el `alias_token`, así que desacopla el charge de `persist_transactions`). En `requery`, el timeout
   está acotado (<30s) con fail-safe a *pending*.
+- **`BANCARD_PERSIST_TRANSACTIONS`** — ver el callout de seguridad abajo.
 - **`BANCARD_SAVED_CARDS_TENANT_COLUMN`** — si tu `bancard_saved_cards` ya tiene una columna de
-  comercio (p.ej. `commerce_id`), apuntá la config ahí para no duplicar con `tenant_ref`.
+  comercio (p.ej. `commerce_id`), apuntá la config ahí. **Seteala ANTES de `php artisan migrate`**:
+  si migrás sin apuntarla, el paquete crea una columna `tenant_ref` fantasma (inofensiva pero
+  duplicada) además de tu `commerce_id`.
+
+> ⚠️ **Seguridad — replay / idempotencia.** El token de Bancard autentica que el mensaje **vino de
+> Bancard**, pero **no firma** `response`/`response_code`. Por eso la protección contra "marcar
+> pagado indebidamente" es la **idempotencia** (o el modo `requery`). Elegí una de estas config
+> **seguras**:
+> - **`persist_transactions=true` (default):** el paquete deduplica el `shop_process_id` de forma
+>   atómica → un reenvío se acusa `duplicate` sin re-despachar. **Recomendado si no tenés dedup propio.**
+> - **`webhook_verification=requery`:** el webhook **ignora el payload** y re-consulta el estado real
+>   a Bancard → inmune a un payload forjado (aunque un atacante tuviera un token válido). **La opción
+>   más fuerte.** No requiere `persist_transactions`.
+> - **`persist_transactions=false` + `token`:** el paquete **no deduplica** → la idempotencia queda
+>   **enteramente en tu listener**, que DEBE deduplicar por `shop_process_id` en **cualquier**
+>   resultado (no solo "paid"): un `single_buy` declinado reenviado como `S` NO debe marcar pagado.
+>   Solo usá esta combinación si tu listener cumple eso.
+>
+> En cualquier caso: el webhook **debe** ir sobre **HTTPS** (el token es una credencial por transacción).
 
 ## Paso 4 — Mové la lógica de negocio a listeners
 
@@ -101,7 +125,10 @@ Event::listen(PaymentSucceeded::class, function (PaymentSucceeded $e) {
 });
 
 Event::listen(PaymentFailed::class, function (PaymentFailed $e) {
-    // $e->errorCode, $e->errorMessage (motivo legible), $e->tenantRef ...
+    // $e->errorCode, $e->errorMessage (motivo legible = extended_response_description), $e->tenantRef
+    // Persistí/actualizá la fila Payment como FALLIDA *con el motivo*, para que tu storefront lo
+    // muestre (extended_response_description / response_description del rechazo). No la omitas: si el
+    // usuario reintenta, necesitás el estado y el motivo del intento anterior.
 });
 ```
 

@@ -1,11 +1,19 @@
 # Diseño — Soporte multi-tenant (Front 1)
 
-> **Estado:** diseño para revisión (aún no implementado). Escrito por el mantenedor
-> del paquete contra la *spec de contrato multi-tenant* aportada por un consumidor
-> real (proyecto multi-comercio). Objetivo: que **cualquier** consumidor multi-tenant
-> pueda **borrar su webhook propio** y confiar 100% en el paquete, con seguridad igual
-> o mejor que la casera — sin forzar el modelo de datos del paquete y **sin romper**
-> a los consumidores single-tenant.
+> **Estado:** **implementado en v2.0.0.** Este es el documento de diseño original; abajo
+> quedan notas donde el diseño divergió de lo entregado. Objetivo: que **cualquier**
+> consumidor multi-tenant pueda **borrar su webhook propio** y confiar 100% en el paquete,
+> con seguridad igual o mejor que la casera — sin forzar el modelo de datos del paquete.
+> Para migrar un consumidor, ver `docs/consumer-migration.md`.
+>
+> ⚠️ **v2.0.0 es un release breaking en la superficie** (aunque el *comportamiento*
+> single-tenant se preserva vía el `GlobalTenantResolver` por defecto). Cambios que
+> rompen la API respecto de 1.x: las rutas del webhook se **colapsaron a una sola**
+> (`POST /webhooks/bancard/confirmation`; desaparecen `/payment` y `/charge`), se
+> **eliminó** el evento `CardRegistered` y todo intento de "webhook de catastro" (Bancard
+> no lo tiene — el catastro es 100% local vía `syncBancardCards()`), y se quitaron las
+> config `auto_save_cards` / `card_registration_webhook_enabled`. Donde el texto de abajo
+> diga "no-breaking", léase **comportamiento single-tenant no-breaking**, no superficie.
 
 ## 1. Contexto y problema
 
@@ -35,15 +43,16 @@ proyecto multi-comercio **no puede** adoptar el webhook del paquete tal cual.
 
 **Objetivos**
 - Un consumidor multi-tenant borra su `WebhookController` + rutas y queda solo con las
-  rutas del paquete + listeners (`PaymentSucceeded`/`PaymentFailed`/`CardRegistered`).
+  rutas del paquete + listeners (`PaymentSucceeded`/`PaymentFailed`).
 - Seguridad ≥ la casera, provista por el paquete (un solo lugar auditado).
 - **Sin** forzar `BancardTransaction`, `persist_transactions=true`, ni el modelo de
   usuario del paquete.
-- **No-breaking** para single-tenant.
+- **No-breaking en comportamiento** para single-tenant (la superficie sí cambia en 2.0.0).
 
 **No-objetivos**
-- Resolver el token del *webhook de catastro*: **no existe** webhook estándar de catastro
-  (el flujo correcto es pull autenticado con `syncBancardCards()`). No perseguir ese TODO.
+- Resolver el token de un *webhook de catastro*: **no existe** — Bancard no envía callback
+  de catastro. El flujo correcto es pull autenticado con `syncBancardCards()`. En v2.0.0 se
+  **eliminó** todo el andamiaje que asumía ese webhook (evento `CardRegistered` incluido).
 - Cambiar el comportamiento single-tenant.
 - Imponer el modelo de datos del paquete a los consumidores.
 
@@ -237,9 +246,12 @@ sirve", resulta **prerrequisito** de la convergencia multi-tenant.)
 
 ## 6. Cambios de código (1a)
 
-- `src/Contracts/BancardTenantResolver.php` — interface (nuevo).
-- `src/Support/BancardTenantContext.php` — value object (nuevo).
-- `src/Support/GlobalTenantResolver.php` — default de llaves globales (nuevo, no-breaking).
+> Nota: al implementar, estos tres tipos quedaron bajo `src/Tenancy/` (no `src/Contracts`
+> ni `src/Support`), namespace `Softlab180\Bancard\Tenancy\…`.
+
+- `src/Tenancy/BancardTenantResolver.php` — interface (nuevo).
+- `src/Tenancy/BancardTenantContext.php` — value object (nuevo).
+- `src/Tenancy/GlobalTenantResolver.php` — default de llaves globales (nuevo, comportamiento no-breaking).
 - `BancardVPOSService::forContext()` — factory por-tenant.
 - `Http/Controllers/WebhookController.php` — resuelve el service por-request desde el resolver;
   **no** toca el Facade singleton; despacha con `tenantRef`.

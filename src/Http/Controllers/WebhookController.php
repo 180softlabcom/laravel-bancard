@@ -112,7 +112,7 @@ class WebhookController extends Controller
             // Error genuinamente inesperado: 500 para que se investigue.
             Log::error('Bancard webhook processing failed', [
                 'error' => $e->getMessage(),
-                'payload' => $payload,
+                'payload' => $this->maskedPayload($payload),
             ]);
 
             return response()->json(['status' => 'error'], 500);
@@ -214,10 +214,26 @@ class WebhookController extends Controller
     protected function logReceived(string $label, array $payload): void
     {
         if (config('bancard.webhook.log_payloads', true)) {
-            Log::info($label, ['payload' => $payload]);
+            Log::info($label, ['payload' => $this->maskedPayload($payload)]);
         } else {
             Log::info($label, ['shop_process_id' => $payload['operation']['shop_process_id'] ?? null]);
         }
+    }
+
+    /**
+     * Devuelve una copia del payload con operation.token ENMASCARADO. El token del
+     * webhook (md5(private_key + shop_process_id + "confirm"/"charge" + amount + currency
+     * [+ alias_token])) es una credencial reutilizable por transacción: no depende del
+     * resultado, así que quien lo lea de los logs podría forjar un callback "pagado"
+     * válido. Nunca loguearlo en claro (igual que logRequest en el saliente).
+     */
+    protected function maskedPayload(array $payload): array
+    {
+        if (isset($payload['operation']['token']) && is_string($payload['operation']['token'])) {
+            $payload['operation']['token'] = substr($payload['operation']['token'], 0, 10).'...';
+        }
+
+        return $payload;
     }
 
     /**

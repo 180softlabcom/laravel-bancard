@@ -4,6 +4,7 @@ namespace Softlab180\Bancard\Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Softlab180\Bancard\Events\PaymentFailed;
 use Softlab180\Bancard\Events\PaymentSucceeded;
 use Softlab180\Bancard\Models\BancardTransaction;
@@ -160,6 +161,26 @@ class PaymentWebhookTest extends TestCase
 
         $res->assertOk()->assertJson(['status' => 'rejected']);
         Event::assertNotDispatched(PaymentSucceeded::class);
+    }
+
+    public function test_el_webhook_no_loguea_el_token_en_claro(): void
+    {
+        // H1: el token del webhook es una credencial reutilizable por transacción (no
+        // depende del resultado). NUNCA debe loguearse completo.
+        config(['bancard.webhook.log_payloads' => true, 'bancard.persist_transactions' => false]);
+
+        $logged = [];
+        Log::listen(function ($log) use (&$logged) {
+            $logged[] = json_encode($log->context);
+        });
+
+        $token = md5($this->priv.$this->shop.'confirm'.$this->amount.$this->currency);
+        $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S', token: $token))->assertOk();
+
+        $this->assertNotEmpty($logged, 'El webhook debería haber logueado la recepción');
+        foreach ($logged as $ctx) {
+            $this->assertStringNotContainsString($token, $ctx, 'El token completo NO debe aparecer en los logs');
+        }
     }
 
     public function test_un_listener_sincronico_que_lanza_no_convierte_el_webhook_en_500(): void
