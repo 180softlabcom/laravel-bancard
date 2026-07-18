@@ -262,4 +262,33 @@ class BancardVPOSServiceTest extends TestCase
         $this->assertSame('i5fn*lx6niQel0QzWK1g', $result['process_id']);
         $this->assertStringContainsString('bancard-checkout-4.0.0.js', $result['checkout_js_url']);
     }
+
+    public function test_fresh_alias_token_matchea_por_card_id_y_devuelve_el_alias_vigente(): void
+    {
+        // El primitive de refresh a nivel service (para consumidores que NO usan el trait).
+        Http::fake(['*/vpos/api/0.3/users/*/cards' => Http::response(['status' => 'success', 'cards' => [
+            ['alias_token' => 'alias_viejo', 'card_id' => 1, 'card_masked_number' => '5100********0002', 'expiration_date' => '02/28'],
+            ['alias_token' => 'alias_fresco', 'card_id' => 42, 'card_masked_number' => '5100********0001', 'expiration_date' => '01/29'],
+        ]])]);
+
+        $this->assertSame('alias_fresco', $this->service()->freshAliasToken(1, ['card_id' => '42']));
+    }
+
+    public function test_fresh_alias_token_matchea_por_masked_y_expiration_si_no_hay_card_id(): void
+    {
+        Http::fake(['*/vpos/api/0.3/users/*/cards' => Http::response(['status' => 'success', 'cards' => [
+            ['alias_token' => 'alias_fresco', 'card_masked_number' => '4111********1111', 'expiration_date' => '10/27'],
+        ]])]);
+
+        $alias = $this->service()->freshAliasToken(1, ['card_masked_number' => '4111********1111', 'expiration_date' => '10/27']);
+
+        $this->assertSame('alias_fresco', $alias);
+    }
+
+    public function test_fresh_alias_token_devuelve_null_si_la_tarjeta_ya_no_esta(): void
+    {
+        Http::fake(['*/vpos/api/0.3/users/*/cards' => Http::response(['status' => 'success', 'cards' => []])]);
+
+        $this->assertNull($this->service()->freshAliasToken(1, ['card_id' => '99']));
+    }
 }

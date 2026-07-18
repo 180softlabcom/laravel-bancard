@@ -265,18 +265,13 @@ trait HasBancardCards
      */
     protected function freshAliasToken(SavedCard $card, ?BancardTenantContext $tenant): ?string
     {
-        $result = $this->bancardService($tenant)->getUserCards($this->getKey());
-
-        $match = collect($result['cards'] ?? [])->first(function (array $c) use ($card) {
-            if (! empty($c['card_id']) && $card->card_id !== null && (string) $c['card_id'] === (string) $card->card_id) {
-                return true;
-            }
-
-            return ($c['card_masked_number'] ?? null) === $card->card_masked_number
-                && ($c['expiration_date'] ?? null) === $card->expiration_date;
-        });
-
-        return ! empty($match['alias_token']) ? $match['alias_token'] : null;
+        // Delega en el service (misma lógica de matching para trait y consumidores del
+        // service directo — una sola fuente de verdad).
+        return $this->bancardService($tenant)->freshAliasToken($this->getKey(), [
+            'card_id' => $card->card_id,
+            'card_masked_number' => $card->card_masked_number,
+            'expiration_date' => $card->expiration_date,
+        ]);
     }
 
     /**

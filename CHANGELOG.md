@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.2.1] - 2026-07-18
+
+> Completa v2.2.0 para consumidores que usan el **service de bajo nivel** (`BancardVPOSService`) en vez del trait `HasBancardCards`. El refresh de alias de v2.2.0 vivía solo en el trait, así que un consumidor que cobra/borra con `chargeWithToken()`/`deleteCard()` directo seguía expuesto al `alias_token` vencido (`CardAliasTokenExpiredError`).
+
+### Added
+- **`BancardVPOSService::freshAliasToken($userId, $cardIdentity): ?string`** (público). Pide un `alias_token` fresco a Bancard (`users_cards`) y matchea la tarjeta por identidad estable (`card_id`, o `card_masked_number` + `expiration_date`). Devuelve null si la tarjeta ya no está catastrada. Un consumidor del service directo lo usa antes de cada charge/delete, sin reimplementar el matching. El trait `HasBancardCards` ahora **delega** en este método (una sola fuente de verdad).
+
+### Notes
+- Aditivo y no-breaking. 50 tests, 5136 assertions.
+
 ## [2.2.0] - 2026-07-18
 
 > El `alias_token` de Bancard es **efímero**: la spec (pág. 35) lo describe como *"alias token temporal"*, con **validez para una sola operación** y **TTL del orden de minutos**. El paquete lo trataba como un token persistente (lo guardaba y cobraba/borraba con él más tarde) → `CardAliasTokenExpiredError` en producción (charge y delete). Esta versión adopta el modelo correcto: el alias es descartable; se pide uno fresco a Bancard justo antes de cada operación.

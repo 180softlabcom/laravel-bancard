@@ -429,6 +429,43 @@ class BancardVPOSService
     }
 
     /**
+     * Devuelve un `alias_token` FRESCO para una tarjeta del usuario, pedido a Bancard en el
+     * momento (`users_cards`).
+     *
+     * El `alias_token` es EFÍMERO: la spec (pág. 35) lo describe como "alias token temporal",
+     * con validez para UNA sola operación y TTL del orden de minutos. Por eso hay que pedir
+     * uno nuevo ANTES de cada charge/delete — el guardado se vence. Matchea la tarjeta por
+     * identidad ESTABLE: `card_id` (preferido) o `card_masked_number` + `expiration_date`.
+     *
+     * Pensado para consumidores que usan el service directo (sin el trait `HasBancardCards`):
+     *
+     *     $alias = $service->freshAliasToken($userId, ['card_id' => $cardId]);
+     *     // $alias === null → la tarjeta ya no está catastrada
+     *     $service->chargeWithToken($payable, $alias, ...);   // o ->deleteCard($userId, $alias)
+     *
+     * Devuelve null si la tarjeta ya no está catastrada en Bancard.
+     *
+     * @param  array{card_id?: mixed, card_masked_number?: ?string, expiration_date?: ?string}  $cardIdentity
+     */
+    public function freshAliasToken(int|string $userId, array $cardIdentity): ?string
+    {
+        $result = $this->getUserCards($userId);
+
+        $match = collect($result['cards'] ?? [])->first(function (array $c) use ($cardIdentity) {
+            if (! empty($cardIdentity['card_id']) && ! empty($c['card_id'])
+                && (string) $c['card_id'] === (string) $cardIdentity['card_id']) {
+                return true;
+            }
+
+            return ! empty($cardIdentity['card_masked_number'])
+                && ($c['card_masked_number'] ?? null) === $cardIdentity['card_masked_number']
+                && ($c['expiration_date'] ?? null) === ($cardIdentity['expiration_date'] ?? null);
+        });
+
+        return ! empty($match['alias_token']) ? $match['alias_token'] : null;
+    }
+
+    /**
      * Delete a saved card.
      */
     public function deleteCard(int|string $userId, string $aliasToken): array
