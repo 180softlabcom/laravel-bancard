@@ -12,22 +12,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Franja PARAM-LESS de Laravel 12 (Dispatchable::dispatch() con func_get_args,
-          # antes de que backportearan el variádico ~12.40+). Es la firma de v12.39.0 que
-          # corre rga: acá un regreso a args NOMBRADOS en dispatch() vuelve a romper y el
-          # CI lo agarra. Un job solo-13 (o incluso 12.x-latest, ya variádico) no lo ve.
-          - laravel: '>=12.0 <12.40'
-            testbench: '10.*'
-            php: '8.3'
-            name: 'Laravel 12 param-less (rga)'
           - laravel: '12.*'
             testbench: '10.*'
             php: '8.3'
-            name: 'Laravel 12 (latest)'
+            name: 'Laravel 12'
           - laravel: '13.*'
             testbench: '11.*'
             php: '8.3'
-            name: 'Laravel 13 (latest)'
+            name: 'Laravel 13'
 
     name: ${{ matrix.name }} (PHP ${{ matrix.php }})
 

@@ -9,10 +9,11 @@
 
 ### CI / Tooling
 - **Matriz de CI (GitHub Actions) en Laravel 12 y 13.** El paquete no tenía CI: solo se probaba en el Laravel local del mantenedor (13). Ahora la suite corre en **Laravel 12** (testbench 10) y **13** (testbench 11) en cada push/PR, para agarrar incompatibilidades por versión antes de publicar.
+- **Test de regresión portable** (`EventDispatchCompatTest`) que reproduce la firma param-less de `dispatch()` de Laravel ≤12 y fija el contrato (nombrado rompe, posicional funciona), independiente de la versión instalada.
 - Quitado el campo `version` hardcodeado de `composer.json` (la versión la define el git tag).
 
 ### Notes
-- 41 tests, 5118 assertions (en Laravel 12 y 13).
+- 43 tests, 5123 assertions (en Laravel 12 y 13).
 
 ## [2.1.0] - 2026-07-17
 
