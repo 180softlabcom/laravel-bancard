@@ -69,21 +69,38 @@ class CardTenancyTest extends TestCase
         $this->assertSame(2, $user->bancardCardsCount());
     }
 
-    public function test_charge_default_card_per_tenant_usa_las_llaves_del_comercio(): void
+    public function test_charge_default_card_refresca_el_alias_y_usa_las_llaves_del_comercio(): void
     {
         config(['bancard.persist_transactions' => false, 'bancard.private_key' => 'GLOBAL_KEY']);
         $commerceKey = 'COMMERCE_A_PRIVATE_KEY';
 
-        SavedCard::create(['user_type' => 'test-user', 'user_id' => 1, 'alias_token' => 'alias_A', 'tenant_ref' => 'commerce-A', 'is_default' => true]);
+        // El alias guardado es EFÍMERO (TTL minutos): el paquete debe pedir uno fresco a
+        // Bancard antes de cobrar, matcheando por identidad estable (card_id).
+        SavedCard::create([
+            'user_type' => 'test-user', 'user_id' => 1,
+            'alias_token' => 'alias_viejo', 'card_id' => '77',
+            'card_masked_number' => '5418********0014', 'expiration_date' => '08/26',
+            'tenant_ref' => 'commerce-A', 'is_default' => true,
+        ]);
 
-        Http::fake(['*/vpos/api/0.3/charge' => Http::response(['confirmation' => ['response' => 'S', 'response_code' => '00']])]);
+        Http::fake([
+            '*/vpos/api/0.3/users/*/cards' => Http::response(['status' => 'success', 'cards' => [
+                ['alias_token' => 'alias_fresco', 'card_id' => 77, 'card_masked_number' => '5418********0014', 'expiration_date' => '08/26'],
+            ]]),
+            '*/vpos/api/0.3/charge' => Http::response(['confirmation' => ['response' => 'S', 'response_code' => '00']]),
+        ]);
 
         $ctx = new BancardTenantContext('pub_A', $commerceKey, 'production', [], 'commerce-A');
         (new TestUser())->chargeDefaultCard(new CardTenancyPayable(), tenant: $ctx);
 
-        // El charge se firmó con la llave del comercio + el alias de la tarjeta del comercio.
-        Http::assertSent(fn ($r) => ($r->data()['operation']['token'] ?? null)
-            === md5($commerceKey.$r->data()['operation']['shop_process_id'].'charge'.'50000.00'.'PYG'.'alias_A'));
+        // Se cobró con el alias FRESCO (no el guardado), firmado con la llave del comercio.
+        Http::assertSent(fn ($r) => str_contains($r->url(), '/charge')
+            && ($r->data()['operation']['token'] ?? null)
+            === md5($commerceKey.$r->data()['operation']['shop_process_id'].'charge'.'50000.00'.'PYG'.'alias_fresco'));
+
+        // Y el users_cards previo se firmó con la llave del comercio (no la global).
+        Http::assertSent(fn ($r) => str_contains($r->url(), '/cards')
+            && ($r->data()['operation']['token'] ?? null) === md5($commerceKey.'1'.'request_user_cards'));
     }
 
     public function test_set_as_default_no_desmarca_la_default_de_otro_comercio(): void
