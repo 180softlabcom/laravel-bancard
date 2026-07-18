@@ -183,7 +183,14 @@ A diferencia del pago ocasional, el charge es una llamada servidor-a-servidor **
 
 La confirmación final llega al webhook único `POST /webhooks/bancard/confirmation`.
 
-> 🔑 **El `alias_token` es efímero** — Bancard lo describe como *"alias token temporal"*, con validez para **una sola operación** y TTL del orden de **minutos** (spec pág. 35). No hace falta que te preocupes por eso: `chargeDefaultCard`/`chargeBancardCard` y `deleteBancardCard` **piden un alias fresco a Bancard (`users_cards`) automáticamente** antes de cada operación, matcheando la tarjeta por su identidad estable (`card_id`). El `alias_token` guardado en `SavedCard` es solo una referencia; **nunca cobres/borres con él directamente** vía `Bancard::` — usá los métodos del trait.
+> 🔑 **El `alias_token` es efímero** — Bancard lo describe como *"alias token temporal"*, con validez para **una sola operación** y TTL del orden de **minutos** (spec pág. 35). No hace falta que te preocupes por eso: `chargeDefaultCard`/`chargeBancardCard` y `deleteBancardCard` **piden un alias fresco a Bancard (`users_cards`) automáticamente** antes de cada operación, matcheando la tarjeta por su identidad estable (`card_id`). El `alias_token` guardado en `SavedCard` es solo una referencia; nunca cobres/borres con el guardado.
+>
+> **¿Usás el service de bajo nivel** (`BancardVPOSService`/`Bancard::`) **en vez del trait?** Pedí el alias fresco con el mismo helper antes de cada charge/delete:
+> ```php
+> $alias = $service->freshAliasToken($userId, ['card_id' => $cardId]); // o ['card_masked_number'=>…, 'expiration_date'=>…]
+> if ($alias === null) { /* la tarjeta ya no está catastrada */ }
+> $service->chargeWithToken($payable, $alias, ...);   // o ->deleteCard($userId, $alias)
+> ```
 
 > **3DS opcional por comercio (`BANCARD_ENABLE_3DS`).** El request de charge envía `extra_response_attributes: ["confirmation.process_id"]` **solo si `BANCARD_ENABLE_3DS=true`**. Ese parámetro **requiere que Bancard tenga habilitado el producto 3DS** para tu comercio; enviarlo sin ese permiso hace que Bancard **rechace la operación** (con riesgo en producción). Activá el flag únicamente cuando Bancard confirme el enrolamiento 3DS. Con el flag en `false` (default), el charge funciona como pago directo sin 3DS.
 
