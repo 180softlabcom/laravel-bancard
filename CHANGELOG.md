@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.2.0] - 2026-07-18
+
+> El `alias_token` de Bancard es **efímero**: la spec (pág. 35) lo describe como *"alias token temporal"*, con **validez para una sola operación** y **TTL del orden de minutos**. El paquete lo trataba como un token persistente (lo guardaba y cobraba/borraba con él más tarde) → `CardAliasTokenExpiredError` en producción (charge y delete). Esta versión adopta el modelo correcto: el alias es descartable; se pide uno fresco a Bancard justo antes de cada operación.
+
+### Changed
+- **`chargeDefaultCard` / `chargeBancardCard` piden un `alias_token` fresco antes de cobrar.** Internamente llaman `users_cards`, matchean la tarjeta por su **identidad estable** (`card_id`, o `card_masked_number` + `expiration_date`) y cobran con el alias vigente. La API para el consumidor **no cambia**. Si la tarjeta ya no está catastrada en Bancard, lanzan una excepción clara.
+- **`deleteBancardCard` refresca el alias antes de borrar** (mismo motivo: el delete firma con el `alias_token`). Ahora es **idempotente**: si la tarjeta ya no está en Bancard, limpia el registro local y acusa éxito sin fallar.
+- **`syncBancardCards` deduplica por identidad estable (`card_id`), no por `alias_token`.** Antes keyeaba el `firstOrNew` por `alias_token`; como el alias cambia en cada `users_cards`, cada sync **creaba una tarjeta local duplicada**. Ahora re-sincronizar actualiza la misma fila.
+
+### Migración
+- **Sin cambios de esquema ni de API.** Un consumidor que hoy cobra/borra con el `alias_token` guardado vía el trait (`chargeDefaultCard`/`chargeBancardCard`/`deleteBancardCard`) pasa a funcionar de forma confiable sin tocar su código. **No** cobres/borres con el alias guardado llamando al service (`Bancard::`) directamente: usá los métodos del trait, que refrescan. Cada charge/delete ahora hace una llamada extra a `users_cards`.
+
+### Notes
+- 47 tests, 5133 assertions (Laravel 12 y 13).
+
 ## [2.1.2] - 2026-07-18
 
 > Requisito de certificación de Bancard: el webhook debe responder **exactamente** `{"status":"success"}` (HTTP 200), sin campos extra (doc eCommerce Bancard, pág. 44). El paquete agregaba `unresolved`/`duplicate`/`pending` al body y devolvía `{"status":"rejected"}` para token inválido.

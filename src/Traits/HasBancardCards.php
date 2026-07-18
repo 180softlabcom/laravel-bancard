@@ -101,13 +101,31 @@ trait HasBancardCards
         return collect($result['cards'] ?? [])
             ->filter(fn ($card) => ! empty($card['alias_token']))
             ->map(function (array $card) use ($tenantColumn, $tenantRef) {
-                $model = SavedCard::firstOrNew([
+                // Identidad ESTABLE de la tarjeta para deduplicar: card_id (o, si falta,
+                // masked+expiration). NUNCA el alias_token: es efímero (validez de una sola
+                // operación, TTL de minutos — doc Bancard) y cambia en cada users_cards, así
+                // que keyear por él crearía una tarjeta nueva en cada sync.
+                $identity = [
                     'user_type' => $this->getMorphClass(),
                     'user_id' => $this->getKey(),
-                    'alias_token' => $card['alias_token'],
-                ]);
+                ];
+
+                if ($tenantRef !== null) {
+                    $identity[$tenantColumn] = $tenantRef;
+                }
+
+                if (! empty($card['card_id'])) {
+                    $identity['card_id'] = $card['card_id'];
+                } else {
+                    $identity['card_masked_number'] = $card['card_masked_number'] ?? null;
+                    $identity['expiration_date'] = $card['expiration_date'] ?? null;
+                }
+
+                $model = SavedCard::firstOrNew($identity);
 
                 $model->fill([
+                    // Se guarda solo como referencia/lookup; es efímero, NO se cobra con él.
+                    'alias_token' => $card['alias_token'],
                     'card_masked_number' => $card['card_masked_number'] ?? null,
                     'card_brand' => $card['card_brand'] ?? null,
                     'card_type' => $card['card_type'] ?? null,
@@ -132,11 +150,25 @@ trait HasBancardCards
      */
     public function deleteBancardCard(string $aliasToken, ?BancardTenantContext $tenant = null): array
     {
-        // Delete from Bancard (con las llaves del comercio si se provee tenant)
-        $result = $this->bancardService($tenant)->deleteCard($this->getKey(), $aliasToken);
+        // El alias guardado es EFÍMERO (TTL de minutos, un solo uso — doc Bancard): no se
+        // puede borrar con él. Ubicamos la tarjeta local por ese alias (lookup), pedimos uno
+        // FRESCO a Bancard por su identidad estable, y borramos con el fresco. Idempotente:
+        // si la tarjeta ya no está en Bancard, se limpia lo local y se acusa éxito.
+        $card = $this->bancardCardsQuery($tenant)->where('alias_token', $aliasToken)->first();
 
-        // Delete local record (scopeado por tenant)
-        $this->bancardCardsQuery($tenant)->where('alias_token', $aliasToken)->delete();
+        $freshAlias = $card ? $this->freshAliasToken($card, $tenant) : $aliasToken;
+
+        $result = ['success' => true, 'already_absent' => true];
+        if ($freshAlias !== null) {
+            $result = $this->bancardService($tenant)->deleteCard($this->getKey(), $freshAlias);
+        }
+
+        // Borrar el registro local (por el modelo si lo tenemos; si no, por el alias dado).
+        if ($card) {
+            $card->delete();
+        } else {
+            $this->bancardCardsQuery($tenant)->where('alias_token', $aliasToken)->delete();
+        }
 
         return $result;
     }
@@ -163,13 +195,7 @@ trait HasBancardCards
             throw new \RuntimeException('No hay tarjeta guardada para este usuario.');
         }
 
-        return $this->bancardService($tenant)->chargeWithToken(
-            payable: $payable,
-            aliasToken: $card->alias_token,
-            numberOfPayments: $numberOfPayments,
-            description: $description,
-            returnUrl: $returnUrl
-        );
+        return $this->chargeBancardCard($card, $payable, $numberOfPayments, $description, $returnUrl, $tenant);
     }
 
     /**
@@ -183,9 +209,18 @@ trait HasBancardCards
         ?string $returnUrl = null,
         ?BancardTenantContext $tenant = null
     ): array {
+        // El alias_token es EFÍMERO (validez de una sola operación, TTL de minutos — doc
+        // Bancard). NUNCA se cobra con el alias guardado: se pide uno fresco a Bancard justo
+        // antes, matcheando la tarjeta por su identidad estable.
+        $aliasToken = $this->freshAliasToken($card, $tenant);
+
+        if ($aliasToken === null) {
+            throw new \RuntimeException('La tarjeta ya no está disponible en Bancard; no se pudo obtener un alias_token vigente para cobrar.');
+        }
+
         return $this->bancardService($tenant)->chargeWithToken(
             payable: $payable,
-            aliasToken: $card->alias_token,
+            aliasToken: $aliasToken,
             numberOfPayments: $numberOfPayments,
             description: $description,
             returnUrl: $returnUrl
@@ -217,6 +252,31 @@ trait HasBancardCards
         return $tenant !== null
             ? BancardVPOSService::forContext($tenant)
             : app(BancardVPOSService::class);
+    }
+
+    /**
+     * Devuelve un alias_token FRESCO para la tarjeta dada, pedido a Bancard en el momento.
+     *
+     * El alias es EFÍMERO (validez de una sola operación, TTL de minutos — doc Bancard: la
+     * respuesta de users_cards lo describe como "alias token temporal"). Por eso el guardado
+     * NUNCA se reusa: antes de cada charge/delete se pide uno nuevo con users_cards y se
+     * matchea la tarjeta por su identidad ESTABLE — card_id, o masked+expiration si falta.
+     * Devuelve null si la tarjeta ya no está catastrada en Bancard.
+     */
+    protected function freshAliasToken(SavedCard $card, ?BancardTenantContext $tenant): ?string
+    {
+        $result = $this->bancardService($tenant)->getUserCards($this->getKey());
+
+        $match = collect($result['cards'] ?? [])->first(function (array $c) use ($card) {
+            if (! empty($c['card_id']) && $card->card_id !== null && (string) $c['card_id'] === (string) $card->card_id) {
+                return true;
+            }
+
+            return ($c['card_masked_number'] ?? null) === $card->card_masked_number
+                && ($c['expiration_date'] ?? null) === $card->expiration_date;
+        });
+
+        return ! empty($match['alias_token']) ? $match['alias_token'] : null;
     }
 
     /**
