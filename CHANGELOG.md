@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.1.2] - 2026-07-18
+
+> Requisito de certificación de Bancard: el webhook debe responder **exactamente** `{"status":"success"}` (HTTP 200), sin campos extra (doc eCommerce Bancard, pág. 44). El paquete agregaba `unresolved`/`duplicate`/`pending` al body y devolvía `{"status":"rejected"}` para token inválido.
+
+### Changed
+- **El webhook responde siempre `{"status":"success"}` (HTTP 200) en todos los caminos no-error** (procesado, duplicado, no-resuelto, pending de re-query, token inválido). La distinción de cada caso pasa del body a los **logs** (`Log::info`/`Log::warning` con el `shop_process_id`). Antes el body variaba (`unresolved`/`duplicate`/`pending`/`rejected`), lo que (a) violaba el formato que Bancard exige para certificar y (b) era un **oráculo de enumeración** (un atacante distinguía id desconocido / token forjado / procesado por la respuesta). Ahora los caminos son indistinguibles desde afuera. El **500** genuino (error inesperado) se mantiene: la doc lo contempla (no-200 → el comercio reconcilia con `get_confirmation`).
+
+### Notes
+- Cambio de superficie en la RESPUESTA del webhook (no en el request ni en los eventos): un consumidor que dependiera de `duplicate`/`unresolved`/`pending` en el body debe leer esa señal de los logs. Los eventos `PaymentSucceeded`/`PaymentFailed` no cambian.
+- 43 tests, 5123 assertions.
+
 ## [2.1.1] - 2026-07-17
 
 > Bug crítico en Laravel ≤12: el webhook validaba el token, devolvía 200, pero el evento **nunca se despachaba** → la orden **nunca se marcaba pagada** (falla silenciosa de pagos). Solo afectaba a consumidores en Laravel ≤12 (v12.39.0 y anteriores); los tests del paquete no lo detectaban porque testbench corría Laravel 13.

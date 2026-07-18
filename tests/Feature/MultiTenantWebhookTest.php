@@ -87,7 +87,7 @@ class MultiTenantWebhookTest extends TestCase
         $tokenConGlobal = md5('GLOBAL_PRIVATE_KEY'.$this->shop.'confirm'.$this->amount.$this->currency);
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload($tokenConGlobal));
 
-        $res->assertOk()->assertJson(['status' => 'rejected']);
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
@@ -100,7 +100,9 @@ class MultiTenantWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('cualquier_token'));
 
-        $res->assertOk()->assertJson(['status' => 'success', 'unresolved' => true]);
+        // Body limpio (Bancard exige {"status":"success"}); "no resuelto" se prueba por
+        // la ausencia de eventos (y queda en el log), no en el body.
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
@@ -114,7 +116,7 @@ class MultiTenantWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('cualquier_token'));
 
-        $res->assertOk()->assertJson(['status' => 'success', 'unresolved' => true]);
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
@@ -235,7 +237,8 @@ class MultiTenantWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('token_ignorado'));
 
-        $res->assertOk()->assertJson(['status' => 'success', 'pending' => true]);
+        // Body limpio; "pending" (reconciliar con get_confirmation) queda en el log.
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
