@@ -90,21 +90,26 @@ class WebhookController extends Controller
             // loguea y se acusa 200; la robustez del listener (idealmente encolado e
             // idempotente) es responsabilidad del consumidor.
             try {
+                // Args POSICIONALES, no nombrados: el trait Dispatchable de Laravel ≤12
+                // (incluido v12.39.0) declara `dispatch()` sin parámetros y lee los args con
+                // func_get_args() → un arg nombrado lanza "Unknown named parameter" en tiempo
+                // de llamada (Laravel 13 lo hizo variádico y por eso los tests en testbench 13
+                // no lo detectaban). Posicional funciona en TODO el rango soportado (^9..^13).
                 if ($isPaid) {
                     PaymentSucceeded::dispatch(
-                        shopProcessId: $shopProcessId,
-                        response: ['confirmation' => $confirmation],
-                        authorizationNumber: $confirmation['authorization_number'] ?? null,
-                        ticketNumber: $confirmation['ticket_number'] ?? null,
-                        tenantRef: $context->tenantRef,
+                        $shopProcessId,
+                        ['confirmation' => $confirmation],
+                        $confirmation['authorization_number'] ?? null,
+                        $confirmation['ticket_number'] ?? null,
+                        $context->tenantRef,
                     );
                 } else {
                     PaymentFailed::dispatch(
-                        shopProcessId: $shopProcessId,
-                        response: ['confirmation' => $confirmation],
-                        errorCode: $confirmation['response_code'] ?? null,
-                        errorMessage: $confirmation['extended_response_description'] ?? $confirmation['response_description'] ?? null,
-                        tenantRef: $context->tenantRef,
+                        $shopProcessId,
+                        ['confirmation' => $confirmation],
+                        $confirmation['response_code'] ?? null,
+                        $confirmation['extended_response_description'] ?? $confirmation['response_description'] ?? null,
+                        $context->tenantRef,
                     );
                 }
             } catch (\Throwable $e) {

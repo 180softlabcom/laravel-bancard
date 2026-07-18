@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.1.1] - 2026-07-17
+
+> Bug crítico en Laravel ≤12: el webhook validaba el token, devolvía 200, pero el evento **nunca se despachaba** → la orden **nunca se marcaba pagada** (falla silenciosa de pagos). Solo afectaba a consumidores en Laravel ≤12 (v12.39.0 y anteriores); los tests del paquete no lo detectaban porque testbench corría Laravel 13.
+
+### Fixed
+- **`dispatch()` de eventos con argumentos posicionales, no nombrados.** `WebhookController` despachaba `PaymentSucceeded`/`PaymentFailed` con **argumentos nombrados** (`dispatch(shopProcessId: …)`). El trait `Illuminate\Foundation\Events\Dispatchable` de **Laravel ≤12** declara `dispatch()` **sin parámetros** (lee los args con `func_get_args()`), así que un argumento nombrado lanza `Error: Unknown named parameter $shopProcessId` en tiempo de llamada. Laravel 13 lo hizo **variádico** (`dispatch(...$arguments)`) → por eso el bug era invisible en la suite (testbench 13). El error caía en el `try/catch` del webhook → se logueaba "un listener falló" y se acusaba 200, dejando el pago sin procesar. Ahora se despacha **posicional**, que funciona en todo el rango soportado (`^9`…`^13`).
+
+### CI / Tooling
+- **Matriz de CI (GitHub Actions) en Laravel 12 y 13.** El paquete no tenía CI: solo se probaba en el Laravel local del mantenedor (13). Ahora la suite corre en **Laravel 12** (testbench 10) y **13** (testbench 11) en cada push/PR, para agarrar incompatibilidades por versión antes de publicar.
+- Quitado el campo `version` hardcodeado de `composer.json` (la versión la define el git tag).
+
+### Notes
+- 41 tests, 5118 assertions (en Laravel 12 y 13).
+
 ## [2.1.0] - 2026-07-17
 
 > Cierra en **código** el último eslabón de H2 (replay/doble-procesamiento): la idempotencia del webhook deja de depender de `persist_transactions` (y de la disciplina del listener del consumidor) y pasa a ser un guard **siempre-activo** del paquete. Alineado con el objetivo de que el paquete sea la única forma segura de usar Bancard, sin forzar el modelo de datos completo.
