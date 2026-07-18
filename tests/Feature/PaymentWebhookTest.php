@@ -54,7 +54,9 @@ class PaymentWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S'));
 
-        $res->assertOk()->assertJson(['status' => 'success']);
+        // Bancard exige responder EXACTAMENTE {"status":"success"}, sin campos extra
+        // (doc pág. 44; requisito de certificación). assertExactJson lo blinda.
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
@@ -77,7 +79,9 @@ class PaymentWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $this->payload('00', 'S', token: 'token_falsificado'));
 
-        $res->assertOk()->assertJson(['status' => 'rejected']);
+        // Bancard exige responder exactamente {"status":"success"} (200). El "no procesado"
+        // se prueba por la ausencia de eventos, no por el body (que no filtra el motivo).
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
         Event::assertNotDispatched(PaymentFailed::class);
     }
@@ -88,10 +92,11 @@ class PaymentWebhookTest extends TestCase
 
         $payload = $this->payload('00', 'S');
         $this->postJson('/webhooks/bancard/confirmation', $payload)->assertOk();
-        // Reenvío del MISMO callback (vPOS puede reenviar): no debe re-disparar.
+        // Reenvío del MISMO callback (vPOS puede reenviar): no debe re-disparar. El body es
+        // el ack limpio; la dedup se prueba por assertDispatchedTimes, no por el body.
         $this->postJson('/webhooks/bancard/confirmation', $payload)
             ->assertOk()
-            ->assertJson(['duplicate' => true]);
+            ->assertExactJson(['status' => 'success']);
 
         Event::assertDispatchedTimes(PaymentSucceeded::class, 1);
     }
@@ -160,7 +165,7 @@ class PaymentWebhookTest extends TestCase
 
         $res = $this->postJson('/webhooks/bancard/confirmation', $payload);
 
-        $res->assertOk()->assertJson(['status' => 'rejected']);
+        $res->assertOk()->assertExactJson(['status' => 'success']);
         Event::assertNotDispatched(PaymentSucceeded::class);
     }
 
@@ -177,7 +182,7 @@ class PaymentWebhookTest extends TestCase
         $this->postJson('/webhooks/bancard/confirmation', $payload)->assertOk();
         $this->postJson('/webhooks/bancard/confirmation', $payload)
             ->assertOk()
-            ->assertJson(['duplicate' => true]);
+            ->assertExactJson(['status' => 'success']);
 
         Event::assertDispatchedTimes(PaymentSucceeded::class, 1);
     }

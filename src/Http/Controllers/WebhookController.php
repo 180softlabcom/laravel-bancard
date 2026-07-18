@@ -46,7 +46,13 @@ class WebhookController extends Controller
             $context = $this->resolveTenant($shopProcessId);
 
             if ($context === null) {
-                return response()->json(['status' => 'success', 'unresolved' => true]);
+                // No se pudo mapear el shop_process_id a un comercio (id desconocido o el
+                // mapeo aún no persistió — race). La distinción va al log; el body es limpio.
+                Log::info('Bancard webhook: shop_process_id no resuelto; 200 sin procesar', [
+                    'shop_process_id' => $shopProcessId,
+                ]);
+
+                return $this->ack();
             }
 
             // Instancia PER-TENANT: valida el token / consulta con la llave del comercio.
@@ -55,28 +61,35 @@ class WebhookController extends Controller
             try {
                 [$isPaid, $confirmation] = $this->verifyConfirmation($service, $payload, $operation, $shopProcessId);
             } catch (BancardException $e) {
-                // Token inválido (ambas fórmulas): no es un callback genuino. 200 rejected.
+                // Token inválido (ambas fórmulas): no es un callback genuino. No se procesa;
+                // el motivo va al log y el body es el ack limpio (no filtramos "rechazado",
+                // así un atacante no distingue id desconocido / token forjado / procesado).
                 Log::warning('Bancard webhook rejected (invalid token)', [
                     'shop_process_id' => $shopProcessId,
                     'error' => $e->getMessage(),
                 ]);
 
-                return response()->json(['status' => 'rejected'], 200);
+                return $this->ack();
             } catch (ConfirmationUnavailableException $e) {
-                // Modo requery: Bancard no disponible/timeout → 200 + pending, sin evento.
+                // Modo requery: Bancard no disponible/timeout → se deja pending (sin evento);
+                // el comercio reconcilia con get_confirmation. La distinción va al log.
                 Log::warning('Bancard webhook: re-query no disponible; se deja pending', [
                     'shop_process_id' => $shopProcessId,
                     'error' => $e->getMessage(),
                 ]);
 
-                return response()->json(['status' => 'success', 'pending' => true]);
+                return $this->ack();
             }
 
             // Idempotencia SIEMPRE activa (independiente de persist_transactions): un
             // callback reenviado por vPOS —o un replay— se acusa 200 sin re-despachar.
             // Cierra H2: el consumidor ya no depende de la idempotencia de su listener.
             if (! $this->idempotencyStore()->claim($shopProcessId)) {
-                return response()->json(['status' => 'success', 'duplicate' => true]);
+                Log::info('Bancard webhook: callback duplicado; 200 sin re-despachar', [
+                    'shop_process_id' => $shopProcessId,
+                ]);
+
+                return $this->ack();
             }
 
             // Registro de negocio completo (opcional, persist_transactions=true): estado
@@ -120,7 +133,7 @@ class WebhookController extends Controller
             }
 
             // vPOS exige HTTP 200 (aprobado o rechazado son resultados de negocio válidos).
-            return response()->json(['status' => 'success']);
+            return $this->ack();
         } catch (\Throwable $e) {
             // Error genuinamente inesperado: 500 para que se investigue.
             Log::error('Bancard webhook processing failed', [
@@ -310,6 +323,21 @@ class WebhookController extends Controller
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Respuesta ÚNICA al callback: HTTP 200 con exactamente {"status":"success"} y sin
+     * campos extra. Bancard lo exige así (doc pág. 44: "responder con status 200" en <30s;
+     * la certificación rechaza campos adicionales). TODOS los caminos no-error del webhook
+     * (procesado, duplicado, no resuelto, pending, token inválido) responden con esto — la
+     * distinción de cada caso vive en los LOGS, no en el body. Beneficio extra: cierra el
+     * oráculo de enumeración (un atacante no puede distinguir los casos por la respuesta).
+     * Un no-200 hace que vPOS marque la confirmación como inválida en su traza (el comercio
+     * reconcilia con get_confirmation); por eso solo un error inesperado genuino devuelve 500.
+     */
+    protected function ack(): JsonResponse
+    {
+        return response()->json(['status' => 'success']);
     }
 
     /**
