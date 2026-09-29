@@ -242,12 +242,28 @@ public function handle(PaymentFailed $event): void
 }
 ```
 
-**Errores de operaciones del cliente** (`rollbackPayment`, `getPaymentConfirmation`, etc.): además del string `error`, el array trae **`raw_response`** con el payload crudo de Bancard, incluyendo `messages[].key` (código estructurado). Usalo para distinguir casos en vez de parsear texto — p.ej. una reversa fuera de ventana:
+**Errores de operaciones del cliente** (`rollbackPayment`, `getPaymentConfirmation`, etc.): además del string `error`, el array trae **`raw_response`** con el payload crudo de Bancard, incluyendo `messages[].key` (código estructurado). Usalo para distinguir casos en vez de parsear texto.
+
+**`rollbackPayment()` nunca lanza** y trae siempre `outcome` — distinguí los casos antes de reembolsar a mano:
+
+| `outcome` | Qué pasó | Qué hacer |
+|---|---|---|
+| `rolled_back` | Bancard aceptó la reversa | Nada: el pago se anula |
+| `already_rolled_back` | `AlreadyRollbackedError`: ya había un pedido de reversa | **No** reembolsar a mano |
+| `rejected` | Bancard respondió `"status": "error"` — ver `bancard_key` | Según la clave: `TransactionAlreadyConfirmed` (ya cuponado) → pedir la anulación en el portal de comercios; `PaymentNotFoundError` → el cliente no pagó |
+| `unknown` | No hubo respuesta confiable (cuerpo no JSON, timeout) — trae `http_status` y `raw_body` | **No es un rechazo**: verificá con `getPaymentConfirmation()` o en el portal antes de reembolsar |
 
 ```php
 $res = Bancard::rollbackPayment($shopProcessId);
-$key = $res['raw_response']['messages'][0]['key'] ?? null; // p.ej. "AlreadyRollbackedError"
+
+match ($res['outcome']) {
+    'rolled_back', 'already_rolled_back' => $order->markAsRefunded(),
+    'rejected' => $order->flagForManualRefund($res['bancard_key'], $res['error']),
+    'unknown'  => $order->flagForReview('Bancard no confirmó la anulación: '.$res['error']),
+};
 ```
+
+**Respuestas que no son JSON.** Si Bancard (o un proxy en el medio) responde una página de error HTML, un cuerpo vacío, o la conexión se corta, el resultado es **desconocido**, no un rechazo. `rollbackPayment()` y `getPaymentConfirmation()` lo devuelven con `outcome => 'unknown'`; el resto de las operaciones lanza **`BancardUnknownOutcomeException`** (hereda de `BancardException`), con `httpStatus`, `rawBody` y `shopProcessId`. En un **charge**, eso significa que el cobro pudo haberse hecho: **no reintentes**; conciliá con `getPaymentConfirmation($e->shopProcessId)` (el paquete igual registra la transacción y guarda el alias, así el webhook de ese cobro se valida si llega).
 
 ## Idempotencia y conciliación
 

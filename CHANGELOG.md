@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.3.0] - 2026-09-29
+
+> Bug en producción (2026-09-29): un comerciante canceló una orden pagada y `rollbackPayment()` devolvió **HTTP 500**. Bancard respondió un cuerpo que no era JSON; `$response->json()` dio `null` y `logResponse(string, array $data)` lanzó un `TypeError` que se escapaba del `catch (Exception)` (un `TypeError` es un `Error`, no una `Exception`). El mismo patrón estaba en las 7 operaciones que llaman a Bancard.
+
+### Fixed
+- **Una respuesta que no es JSON ya no explota en ninguna operación.** Todas las respuestas pasan por un único `decodeResponse()`: si el cuerpo no es un objeto JSON (página de error HTML, cuerpo vacío, un escalar), se registra el código HTTP y un fragmento del cuerpo (sin HTML, recortado, con tokens redactados) y se trata como **resultado desconocido**. Los `catch` pasan de `Exception` a `\Throwable`.
+
+### Added
+- **`BancardUnknownOutcomeException`** (hereda de `BancardException`, así que el código que ya la atrapa no cambia): "no sabemos si Bancard ejecutó la operación". Trae `endpoint`, `httpStatus`, `rawBody` y `shopProcessId`. La lanzan `createSingleBuy`, `chargeWithToken`, `initiateCardRegistration`, `getUserCards` y `deleteCard` cuando la respuesta no es JSON.
+- **`rollbackPayment()` trae siempre `outcome`**: `rolled_back`, `already_rolled_back` (`AlreadyRollbackedError`: no reembolsar a mano), `rejected` (Bancard dijo `"status": "error"`, ver `bancard_key`) o `unknown` (sin respuesta confiable; trae `http_status` y `raw_body`). Nunca lanza. **"Desconocido" ya no se confunde con "rechazado"**, que llevaba a reembolsar dos veces. Las claves salen de la doc de Bancard (pág. 51-54).
+- `getPaymentConfirmation()`: con cuerpo no JSON o error inesperado devuelve `outcome => 'unknown'` (+ `http_status`, `raw_body`), sin lanzar.
+
+### Changed
+- **`chargeWithToken()` con resultado desconocido lanza `BancardUnknownOutcomeException`** en vez de un `BancardException` genérico: el cobro **pudo haberse hecho**, no hay que reintentar. Cubre cuerpo no JSON, un JSON que no es respuesta de cobro (un proxy con `"status": 500`, `"success"` sin `confirmation`), conexión cortada o timeout (incluida la `RequestException` de Guzzle sin respuesta con la que Laravel ≤11 reporta un corte a mitad de la respuesta) y cualquier error después de enviar el pedido. Antes de lanzar registra la transacción una sola vez (alias en el idempotency store + `storeBancardPayment` del `Payable`), para que el webhook de ese cobro se valide si llega y el consumidor tenga el `shop_process_id` para conciliar. Un error **explícito** de Bancard (`"status": "error"` con `messages`, p.ej. `InvalidTokenError`) sigue devolviendo `success => false`, ahora con el motivo de Bancard en `error`.
+- **Qué cuenta como respuesta de Bancard.** En rollback y charge, un `status` que no es exactamente `"success"`, o `"error"` acompañado de su lista `messages`, ya no se toma como rechazo: es desconocido. `AlreadyRollbackedError` se busca en todos los mensajes, no solo en el primero.
+- **Robustez ante tipos raros:** `getUserCards()` descarta un `cards` que no es lista (el refresh de alias ya no revienta), `getErrorMessage()` usa solo textos, y `BancardException::getBancardMessages()` / `getBancardStatus()` / `isTokenError()` / `isCredentialsError()` ya no lanzan `TypeError` con `messages` o `status` de otro tipo. El fragmento del cuerpo convierte latin1 a UTF-8 en vez de perderlo.
+
+### Compatibilidad
+- Aditivo en los arrays (`outcome`, `bancard_key`, `http_status`, `raw_body`); las claves anteriores (`success`, `error`, `message`, `raw_response`) no cambian. La excepción nueva es subclase de `BancardException`. Sin migraciones.
+- 72 tests, 5201 assertions.
+
 ## [2.2.1] - 2026-07-18
 
 > Completa v2.2.0 para consumidores que usan el **service de bajo nivel** (`BancardVPOSService`) en vez del trait `HasBancardCards`. El refresh de alias de v2.2.0 vivía solo en el trait, así que un consumidor que cobra/borra con `chargeWithToken()`/`deleteCard()` directo seguía expuesto al `alias_token` vencido (`CardAliasTokenExpiredError`).

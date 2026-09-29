@@ -2,12 +2,15 @@
 
 namespace Softlab180\Bancard\Services;
 
-use Exception;
+use GuzzleHttp\Exception\TransferException;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Softlab180\Bancard\Contracts\BancardIdempotencyStore;
 use Softlab180\Bancard\Contracts\Payable;
 use Softlab180\Bancard\Exceptions\BancardException;
+use Softlab180\Bancard\Exceptions\BancardUnknownOutcomeException;
 use Softlab180\Bancard\Models\BancardTransaction;
 
 class BancardVPOSService
@@ -112,9 +115,7 @@ class BancardVPOSService
             $response = Http::timeout(30)
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy', $requestData);
 
-            $responseData = $response->json();
-
-            $this->logResponse('single_buy', $responseData);
+            $responseData = $this->decodeResponse('single_buy', $response, $shopProcessId);
 
             if (($responseData['status'] ?? '') !== 'success') {
                 throw new BancardException(
@@ -139,7 +140,9 @@ class BancardVPOSService
                 'raw_response' => $responseData,
             ];
 
-        } catch (Exception $e) {
+        } catch (BancardUnknownOutcomeException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
             Log::error('Bancard single_buy error', [
                 'message' => $e->getMessage(),
                 'shop_process_id' => $shopProcessId,
@@ -216,26 +219,51 @@ class BancardVPOSService
 
         $this->logRequest('charge', $requestData);
 
+        // Si la transacción ya se registró, un error posterior no la vuelve a registrar.
+        $recorded = false;
+
         try {
             $response = Http::timeout(30)
                 ->post($this->baseUrl . '/vpos/api/0.3/charge', $requestData);
 
-            $responseData = $response->json();
+            $responseData = $this->decodeResponse('charge', $response, $shopProcessId);
 
-            $this->logResponse('charge', $responseData);
+            // Una respuesta de Bancard es: "confirmation" como objeto (el resultado del cobro),
+            // o un error explícito ("status": "error" con su lista "messages", p.ej.
+            // InvalidTokenError). Cualquier otro JSON — de un proxy, "status" numérico,
+            // "success" sin "confirmation" — no dice si se cobró: es desconocido, NO un rechazo
+            // (tratarlo como rechazo invita a reintentar y cobrar dos veces).
+            $hasConfirmation = is_array($responseData['confirmation'] ?? null);
+            $isBancardError = ($responseData['status'] ?? null) === 'error'
+                && is_array($responseData['messages'] ?? null);
 
-            $confirmation = $responseData['confirmation'] ?? [];
+            if (! $hasConfirmation && ! $isBancardError) {
+                throw new BancardUnknownOutcomeException(
+                    "Bancard respondió un JSON que no es una respuesta de cobro en charge (HTTP {$response->status()}): "
+                    .'no se sabe si el cobro se procesó.',
+                    'charge',
+                    $response->status(),
+                    $this->bodySnippet($response->body()),
+                    $shopProcessId,
+                );
+            }
 
-            $this->recordTransaction($payable, $shopProcessId, $confirmation['process_id'] ?? null, $amount, $currency, 'charge', $aliasToken);
+            $confirmation = $hasConfirmation ? $responseData['confirmation'] : [];
+            $processId = is_string($confirmation['process_id'] ?? null) && $confirmation['process_id'] !== ''
+                ? $confirmation['process_id']
+                : null;
+
+            $this->recordTransaction($payable, $shopProcessId, $processId, $amount, $currency, 'charge', $aliasToken);
+            $recorded = true;
 
             // Check if 3DS is required
-            if (isset($confirmation['process_id']) && !empty($confirmation['process_id']) && empty($confirmation['response'])) {
+            if ($processId !== null && empty($confirmation['response'])) {
                 return [
                     'success' => true,
                     'requires_3ds' => true,
                     'shop_process_id' => $shopProcessId,
-                    'process_id' => $confirmation['process_id'],
-                    'checkout_js_url' => $this->buildCheckoutScriptUrl($confirmation['process_id']),
+                    'process_id' => $processId,
+                    'checkout_js_url' => $this->buildCheckoutScriptUrl($processId),
                     'raw_response' => $responseData,
                 ];
             }
@@ -258,28 +286,74 @@ class BancardVPOSService
                 ];
             }
 
-            // Payment rejected
+            // Payment rejected (Bancard lo dijo explícitamente)
             return [
                 'success' => false,
                 'requires_3ds' => false,
                 'shop_process_id' => $shopProcessId,
-                'error' => $confirmation['response_description'] ?? 'Payment rejected',
+                'error' => is_string($confirmation['response_description'] ?? null)
+                    ? $confirmation['response_description']
+                    : ($isBancardError ? $this->getErrorMessage($responseData) : 'Payment rejected'),
                 'response_code' => $confirmation['response_code'] ?? null,
                 'raw_response' => $responseData,
             ];
 
-        } catch (Exception $e) {
-            Log::error('Bancard charge error', [
-                'message' => $e->getMessage(),
-                'shop_process_id' => $shopProcessId,
-            ]);
+        } catch (BancardUnknownOutcomeException $e) {
+            if (! $recorded) {
+                $this->recordUnknownCharge($payable, $shopProcessId, $amount, $currency, $aliasToken, $e->getMessage());
+            }
 
-            throw new BancardException(
-                'Error charging card: ' . $e->getMessage(),
-                [],
-                $e
+            throw $e;
+        } catch (ConnectionException|TransferException $e) {
+            // Timeout o conexión cortada: el cobro pudo haberse enviado y hecho. (En Laravel
+            // ≤11, un corte a mitad de la respuesta — cURL 56 — llega como RequestException de
+            // Guzzle, no como ConnectionException: por eso también TransferException.)
+            if (! $recorded) {
+                $this->recordUnknownCharge($payable, $shopProcessId, $amount, $currency, $aliasToken, $e->getMessage());
+            }
+
+            throw new BancardUnknownOutcomeException(
+                'No hubo respuesta de Bancard al cobrar (timeout o conexión cortada): el cobro pudo haberse hecho. '
+                .'Verificá con getPaymentConfirmation() antes de reintentar.',
+                'charge',
+                null,
+                null,
+                $shopProcessId,
+                $e,
+            );
+        } catch (\Throwable $e) {
+            // Todo lo que hay en este bloque ocurre durante o después de enviar el cobro: si
+            // algo falla, no sabemos si se cobró. Dirección segura: desconocido, no "fallo".
+            if (! $recorded) {
+                $this->recordUnknownCharge($payable, $shopProcessId, $amount, $currency, $aliasToken, $e->getMessage());
+            }
+
+            throw new BancardUnknownOutcomeException(
+                'Error al procesar el cobro ('.$e->getMessage().'): el cobro pudo haberse hecho. '
+                .'Verificá con getPaymentConfirmation() antes de reintentar.',
+                'charge',
+                null,
+                null,
+                $shopProcessId,
+                $e,
             );
         }
+    }
+
+    /**
+     * Charge con resultado DESCONOCIDO: se registra igual (transacción pending + alias en el
+     * idempotency store + storeBancardPayment del Payable). Así el webhook de ese cobro, si
+     * llega, puede validar el token (necesita el alias), y el consumidor tiene el
+     * shop_process_id para conciliar con getPaymentConfirmation().
+     */
+    protected function recordUnknownCharge(Payable $payable, string $shopProcessId, string $amount, string $currency, string $aliasToken, string $reason): void
+    {
+        Log::error('Bancard charge: resultado DESCONOCIDO', [
+            'shop_process_id' => $shopProcessId,
+            'reason' => $reason,
+        ]);
+
+        $this->recordTransaction($payable, $shopProcessId, null, $amount, $currency, 'charge', $aliasToken);
     }
 
     /*
@@ -326,9 +400,7 @@ class BancardVPOSService
             $response = Http::timeout(30)
                 ->post($this->baseUrl . '/vpos/api/0.3/cards/new', $requestData);
 
-            $responseData = $response->json();
-
-            $this->logResponse('cards/new', $responseData);
+            $responseData = $this->decodeResponse('cards/new', $response);
 
             if (($responseData['status'] ?? '') !== 'success') {
                 throw new BancardException(
@@ -348,7 +420,9 @@ class BancardVPOSService
                 'raw_response' => $responseData,
             ];
 
-        } catch (Exception $e) {
+        } catch (BancardUnknownOutcomeException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
             Log::error('Bancard card registration error', [
                 'message' => $e->getMessage(),
                 'user_id' => $userId,
@@ -387,13 +461,11 @@ class BancardVPOSService
             $response = Http::timeout(30)
                 ->post($this->baseUrl . '/vpos/api/0.3/users/' . $userId . '/cards', $requestData);
 
-            $responseData = $response->json();
-
-            $this->logResponse('users/cards', $responseData);
+            $responseData = $this->decodeResponse('users/cards', $response);
 
             if (($responseData['status'] ?? '') !== 'success') {
                 // No cards is not an error
-                if (str_contains($responseData['messages'][0]['dsc'] ?? '', 'no tiene tarjetas')) {
+                if (str_contains($this->getErrorMessage($responseData), 'no tiene tarjetas')) {
                     return [
                         'success' => true,
                         'cards' => [],
@@ -406,15 +478,21 @@ class BancardVPOSService
                 );
             }
 
+            // Solo tarjetas que son objetos: un "cards" que no es lista (o con elementos que
+            // no son objetos) no debe reventar a quien las recorre con `array $card`.
+            $cards = is_array($responseData['cards'] ?? null)
+                ? array_values(array_filter($responseData['cards'], 'is_array'))
+                : [];
+
             return [
                 'success' => true,
-                'cards' => $responseData['cards'] ?? [],
+                'cards' => $cards,
                 'raw_response' => $responseData,
             ];
 
         } catch (BancardException $e) {
             throw $e;
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Bancard get cards error', [
                 'message' => $e->getMessage(),
                 'user_id' => $userId,
@@ -451,9 +529,15 @@ class BancardVPOSService
     {
         $result = $this->getUserCards($userId);
 
-        $match = collect($result['cards'] ?? [])->first(function (array $c) use ($cardIdentity) {
-            if (! empty($cardIdentity['card_id']) && ! empty($c['card_id'])
-                && (string) $c['card_id'] === (string) $cardIdentity['card_id']) {
+        $wantedId = $cardIdentity['card_id'] ?? null;
+
+        $match = collect($result['cards'] ?? [])->first(function ($c) use ($cardIdentity, $wantedId) {
+            if (! is_array($c)) {
+                return false;
+            }
+
+            if (is_scalar($wantedId) && (string) $wantedId !== ''
+                && is_scalar($c['card_id'] ?? null) && (string) $c['card_id'] === (string) $wantedId) {
                 return true;
             }
 
@@ -462,7 +546,7 @@ class BancardVPOSService
                 && ($c['expiration_date'] ?? null) === ($cardIdentity['expiration_date'] ?? null);
         });
 
-        return ! empty($match['alias_token']) ? $match['alias_token'] : null;
+        return is_string($match['alias_token'] ?? null) && $match['alias_token'] !== '' ? $match['alias_token'] : null;
     }
 
     /**
@@ -491,9 +575,7 @@ class BancardVPOSService
             $response = Http::timeout(30)
                 ->delete($this->baseUrl . '/vpos/api/0.3/users/' . $userId . '/cards', $requestData);
 
-            $responseData = $response->json();
-
-            $this->logResponse('users/cards/delete', $responseData);
+            $responseData = $this->decodeResponse('users/cards/delete', $response);
 
             if (($responseData['status'] ?? '') !== 'success') {
                 throw new BancardException(
@@ -509,7 +591,7 @@ class BancardVPOSService
 
         } catch (BancardException $e) {
             throw $e;
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             Log::error('Bancard delete card error', [
                 'message' => $e->getMessage(),
                 'user_id' => $userId,
@@ -558,9 +640,7 @@ class BancardVPOSService
             $response = Http::timeout($timeout ?? 30)
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy/confirmations', $requestData);
 
-            $responseData = $response->json();
-
-            $this->logResponse('single_buy/confirmations', $responseData);
+            $responseData = $this->decodeResponse('single_buy/confirmations', $response, $shopProcessId);
 
             if (($responseData['status'] ?? '') !== 'success') {
                 return [
@@ -570,7 +650,7 @@ class BancardVPOSService
                 ];
             }
 
-            $confirmation = $responseData['confirmation'] ?? [];
+            $confirmation = is_array($responseData['confirmation'] ?? null) ? $responseData['confirmation'] : [];
 
             return [
                 'success' => true,
@@ -580,7 +660,16 @@ class BancardVPOSService
                 'raw_response' => $responseData,
             ];
 
-        } catch (Exception $e) {
+        } catch (BancardUnknownOutcomeException $e) {
+            // No se pudo leer el estado (cuerpo no JSON). No es "no pagado": es desconocido.
+            return [
+                'success' => false,
+                'outcome' => 'unknown',
+                'error' => $e->getMessage(),
+                'http_status' => $e->httpStatus,
+                'raw_body' => $e->rawBody,
+            ];
+        } catch (\Throwable $e) {
             Log::error('Bancard get confirmation error', [
                 'message' => $e->getMessage(),
                 'shop_process_id' => $shopProcessId,
@@ -588,6 +677,7 @@ class BancardVPOSService
 
             return [
                 'success' => false,
+                'outcome' => 'unknown',
                 'error' => $e->getMessage(),
             ];
         }
@@ -601,6 +691,18 @@ class BancardVPOSService
 
     /**
      * Rollback a payment.
+     *
+     * Nunca lanza. Devuelve siempre `success` y `outcome`:
+     * - 'rolled_back'         → Bancard aceptó la reversa ("status": "success").
+     * - 'already_rolled_back' → AlreadyRollbackedError: ya había un pedido de reversa previo.
+     *                           NO reembolsar a mano: el pago ya se está reversando.
+     * - 'rejected'            → Bancard contestó "status": "error" (ver `bancard_key`: p.ej.
+     *                           TransactionAlreadyConfirmed = ya cuponado, hay que pedir la
+     *                           anulación manual; PaymentNotFoundError = el cliente no pagó).
+     * - 'unknown'             → no hubo una respuesta confiable (cuerpo no JSON, sin "status",
+     *                           timeout). NO es un rechazo: el pago pudo haberse reversado.
+     *                           Trae `http_status` y `raw_body`. Verificar antes de reembolsar.
+     * (Claves de error: doc eCommerce Bancard, pág. 51-54.)
      */
     public function rollbackPayment(string $shopProcessId): array
     {
@@ -625,34 +727,50 @@ class BancardVPOSService
             $response = Http::timeout(30)
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy/rollback', $requestData);
 
-            $responseData = $response->json();
+            $responseData = $this->decodeResponse('single_buy/rollback', $response, $shopProcessId);
 
-            $this->logResponse('single_buy/rollback', $responseData);
+            $status = $responseData['status'] ?? null;
+            $keys = $this->messageKeys($responseData);
 
-            if (($responseData['status'] ?? '') === 'success') {
+            if ($status === 'success') {
                 return [
                     'success' => true,
+                    'outcome' => 'rolled_back',
                     'message' => 'Rollback completed successfully',
+                    'bancard_key' => $keys[0] ?? null,
                     'raw_response' => $responseData,
                 ];
             }
 
+            // Un rechazo de Bancard trae "status": "error" y su lista "messages" (doc pág.
+            // 53-54). Cualquier otro JSON — de un proxy, "status" numérico — no dice si se
+            // reversó: es desconocido. Tratarlo como rechazo invita a reembolsar dos veces.
+            if ($status !== 'error' || ! is_array($responseData['messages'] ?? null)) {
+                return $this->unknownRollbackResult(
+                    $shopProcessId,
+                    'respuesta JSON que no es de Bancard',
+                    $response->status(),
+                    $this->bodySnippet($response->body()),
+                );
+            }
+
+            $alreadyRolledBack = in_array('AlreadyRollbackedError', $keys, true);
+
             return [
                 'success' => false,
+                'outcome' => $alreadyRolledBack ? 'already_rolled_back' : 'rejected',
                 'error' => $this->getErrorMessage($responseData),
+                'bancard_key' => $alreadyRolledBack ? 'AlreadyRollbackedError' : ($keys[0] ?? null),
                 'raw_response' => $responseData,
             ];
 
-        } catch (Exception $e) {
-            Log::error('Bancard rollback error', [
-                'message' => $e->getMessage(),
-                'shop_process_id' => $shopProcessId,
-            ]);
-
-            return [
-                'success' => false,
-                'error' => $e->getMessage(),
-            ];
+        } catch (BancardUnknownOutcomeException $e) {
+            return $this->unknownRollbackResult($shopProcessId, 'la respuesta no es JSON', $e->httpStatus, $e->rawBody);
+        } catch (ConnectionException|TransferException $e) {
+            // Timeout o conexión cortada: el pedido pudo haber llegado a Bancard.
+            return $this->unknownRollbackResult($shopProcessId, 'sin respuesta: '.$e->getMessage(), null, null);
+        } catch (\Throwable $e) {
+            return $this->unknownRollbackResult($shopProcessId, 'error inesperado: '.$e->getMessage(), null, null);
         }
     }
 
@@ -981,12 +1099,54 @@ class BancardVPOSService
      */
     protected function getErrorMessage(array $response): string
     {
-        if (isset($response['messages']) && is_array($response['messages'])) {
-            $messages = array_map(fn($m) => $m['dsc'] ?? $m['key'] ?? '', $response['messages']);
-            return implode('. ', array_filter($messages));
+        // Solo textos: un "dsc" o "message" que no es string (respuesta rara) no debe
+        // convertirse en un TypeError / "Array to string conversion".
+        if (is_array($response['messages'] ?? null)) {
+            $messages = array_map(function ($m) {
+                if (is_string($m)) {
+                    return $m;
+                }
+                if (is_array($m)) {
+                    foreach (['dsc', 'key'] as $field) {
+                        if (is_string($m[$field] ?? null) && $m[$field] !== '') {
+                            return $m[$field];
+                        }
+                    }
+                }
+
+                return '';
+            }, $response['messages']);
+
+            $text = implode('. ', array_filter($messages));
+
+            if ($text !== '') {
+                return $text;
+            }
         }
 
-        return $response['message'] ?? 'Unknown Bancard error';
+        return is_string($response['message'] ?? null) ? $response['message'] : 'Unknown Bancard error';
+    }
+
+    /**
+     * Las claves estructuradas de `messages[].key` de una respuesta de Bancard (p.ej.
+     * "AlreadyRollbackedError"), solo las que son texto, en orden.
+     *
+     * @return list<string>
+     */
+    protected function messageKeys(array $response): array
+    {
+        if (! is_array($response['messages'] ?? null)) {
+            return [];
+        }
+
+        $keys = [];
+        foreach ($response['messages'] as $message) {
+            if (is_array($message) && is_string($message['key'] ?? null)) {
+                $keys[] = $message['key'];
+            }
+        }
+
+        return $keys;
     }
 
     /**
@@ -1020,6 +1180,90 @@ class BancardVPOSService
                 'data' => $data,
             ]);
         }
+    }
+
+    /**
+     * Decodifica la respuesta de Bancard a array. Es el ÚNICO punto por donde pasa el cuerpo
+     * de toda respuesta: `$response->json()` da null (o un escalar) cuando el cuerpo no es un
+     * objeto JSON — una página de error HTML de un proxy, un cuerpo vacío — y pasar eso a
+     * código tipado `array` era un TypeError que se escapaba del `catch (Exception)` como 500
+     * (rollback en producción, 2026-09-29). Si no es un objeto JSON, lanza
+     * BancardUnknownOutcomeException con el código HTTP y un fragmento del cuerpo.
+     */
+    protected function decodeResponse(string $endpoint, Response $response, ?string $shopProcessId = null): array
+    {
+        try {
+            $data = $response->json();
+        } catch (\Throwable) {
+            $data = null;
+        }
+
+        if (! is_array($data)) {
+            $rawBody = $this->bodySnippet($response->body());
+
+            Log::warning('Bancard: la respuesta no es JSON; resultado desconocido', [
+                'endpoint' => $endpoint,
+                'http_status' => $response->status(),
+                'shop_process_id' => $shopProcessId,
+                'body' => $rawBody,
+            ]);
+
+            throw new BancardUnknownOutcomeException(
+                "Bancard respondió algo que no es JSON en {$endpoint} (HTTP {$response->status()}): "
+                .'no se sabe si la operación se procesó.',
+                $endpoint,
+                $response->status(),
+                $rawBody,
+                $shopProcessId,
+            );
+        }
+
+        $this->logResponse($endpoint, $data);
+
+        return $data;
+    }
+
+    /**
+     * Fragmento legible y seguro de un cuerpo no JSON, para logs y para devolver al llamador:
+     * sin etiquetas HTML, espacios colapsados, recortado, y con cualquier hash de 32 hex
+     * (el formato de los tokens md5 del paquete) reemplazado, por si una página de error
+     * repitiera el pedido enviado.
+     */
+    protected function bodySnippet(string $body, int $max = 500): string
+    {
+        // Un cuerpo que no es UTF-8 válido (p.ej. latin1) haría que preg_replace con /u
+        // devuelva null y se pierda el diagnóstico: se convierte antes.
+        if (! mb_check_encoding($body, 'UTF-8')) {
+            $body = mb_convert_encoding($body, 'UTF-8', 'ISO-8859-1');
+        }
+
+        $text = strip_tags($body);
+        $text = preg_replace('/\b[a-f0-9]{32}\b/i', '[redactado]', $text) ?? '';
+        $text = trim(preg_replace('/\s+/u', ' ', $text) ?? '');
+
+        return mb_strlen($text) > $max ? mb_substr($text, 0, $max).'…' : $text;
+    }
+
+    /**
+     * Resultado de rollbackPayment() cuando NO se sabe si Bancard reversó: success=false,
+     * pero con outcome 'unknown' para que no se confunda con un rechazo explícito.
+     */
+    protected function unknownRollbackResult(string $shopProcessId, string $reason, ?int $httpStatus, ?string $rawBody): array
+    {
+        Log::error('Bancard rollback: resultado DESCONOCIDO', [
+            'shop_process_id' => $shopProcessId,
+            'http_status' => $httpStatus,
+            'reason' => $reason,
+        ]);
+
+        return [
+            'success' => false,
+            'outcome' => 'unknown',
+            'error' => 'No se pudo confirmar si Bancard anuló el pago ('.$reason.'). '
+                .'Verificá el estado con getPaymentConfirmation() o en el portal de Bancard antes de reembolsar.',
+            'http_status' => $httpStatus,
+            'raw_body' => $rawBody,
+        ];
     }
 
     /**
