@@ -31,7 +31,8 @@ class BancardException extends Exception
      */
     public function getBancardMessages(): array
     {
-        return $this->bancardResponse['messages'] ?? [];
+        // Una respuesta rara ("messages": "texto") no debe convertirse en TypeError.
+        return is_array($this->bancardResponse['messages'] ?? null) ? $this->bancardResponse['messages'] : [];
     }
 
     /**
@@ -39,7 +40,7 @@ class BancardException extends Exception
      */
     public function getBancardStatus(): ?string
     {
-        return $this->bancardResponse['status'] ?? null;
+        return is_string($this->bancardResponse['status'] ?? null) ? $this->bancardResponse['status'] : null;
     }
 
     /**
@@ -47,9 +48,7 @@ class BancardException extends Exception
      */
     public function isCredentialsError(): bool
     {
-        $messages = $this->getBancardMessages();
-        foreach ($messages as $msg) {
-            $key = $msg['key'] ?? '';
+        foreach ($this->messageKeys() as $key) {
             if (str_contains($key, 'InvalidCredentials') || str_contains($key, 'InvalidPublicKey')) {
                 return true;
             }
@@ -62,13 +61,27 @@ class BancardException extends Exception
      */
     public function isTokenError(): bool
     {
-        $messages = $this->getBancardMessages();
-        foreach ($messages as $msg) {
-            $key = $msg['key'] ?? '';
+        foreach ($this->messageKeys() as $key) {
             if (str_contains($key, 'InvalidToken') || str_contains($key, 'TokenMismatch')) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Las `messages[].key` que son texto.
+     *
+     * @return list<string>
+     */
+    protected function messageKeys(): array
+    {
+        $keys = [];
+        foreach ($this->getBancardMessages() as $message) {
+            if (is_array($message) && is_string($message['key'] ?? null)) {
+                $keys[] = $message['key'];
+            }
+        }
+        return $keys;
     }
 }
