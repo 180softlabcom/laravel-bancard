@@ -56,12 +56,15 @@ BANCARD_CANCEL_URL=/payment/cancel
 BANCARD_PERSIST_TRANSACTIONS=true      # registra cada operación para idempotencia/conciliación
 BANCARD_CHECKOUT_SCRIPT_VERSION=4.0.0  # versión del SDK JS de checkout
 BANCARD_ENABLE_3DS=false               # 3DS en charge (opt-in): requiere que Bancard habilite el producto 3DS al comercio
+BANCARD_HTTP_VERSION=2.0               # 2.0 (default) | 1.1 — ver nota de Cloudflare abajo
 BANCARD_USER_MODEL="App\\Models\\User"
 # Multi-tenant (ver docs/multi-tenant.md):
 BANCARD_TENANT_RESOLVER=               # class-string de BancardTenantResolver; vacío = single-tenant (llaves globales)
 BANCARD_WEBHOOK_VERIFICATION=token     # token | requery (requery = re-consulta el estado a Bancard, zero-trust)
 BANCARD_WEBHOOK_REQUERY_TIMEOUT=8      # segundos, solo modo requery (<30s)
 ```
+
+> **HTTP/2 hacia vPOS (Cloudflare).** Cloudflare, delante de `vpos.infonet.com.py`, bloquea con un **403 en HTML** ("Sorry, you have been blocked") los pedidos **HTTP/1.1** que salen con la huella TLS de **OpenSSL 3.0** — la de Ubuntu 22/24 y los servidores de Forge. Con HTTP/2 pasan. Por eso, desde v2.3.1, **todas** las llamadas del paquete salen por HTTP/2 (`BANCARD_HTTP_VERSION=2.0`). Si el curl del servidor no soporta HTTP/2, el paquete usa HTTP/1.1 solo (Guzzle no lo hace: fallaría antes de enviar) y deja un aviso en el log. Para comprobar tu servidor: `php -r 'echo (curl_version()["features"] & CURL_VERSION_HTTP2) ? "HTTP/2 ok" : "sin HTTP/2";'`.
 
 ## Uso
 

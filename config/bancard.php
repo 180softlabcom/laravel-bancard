@@ -62,6 +62,25 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Versión de HTTP hacia vPOS
+    |--------------------------------------------------------------------------
+    |
+    | Cloudflare, delante de vpos.infonet.com.py, bloquea ("Sorry, you have been
+    | blocked", 403 en HTML) los pedidos HTTP/1.1 que salen con la huella TLS de
+    | OpenSSL 3.0 — la de Ubuntu 22/24 y de los servidores de Forge. Con HTTP/2
+    | pasan (medido en producción, 2026-09-29). Por eso el default es '2.0'.
+    |
+    | Si el curl del servidor no tiene soporte de HTTP/2, el paquete usa '1.1'
+    | automáticamente (Guzzle NO lo hace solo: fallaría antes de enviar). Si vPOS
+    | no ofreciera HTTP/2, curl baja a 1.1 en la negociación TLS (ALPN).
+    |
+    | Valores: '2.0' (default) o '1.1' (para volver al comportamiento anterior).
+    |
+    */
+    'http_version' => env('BANCARD_HTTP_VERSION', '2.0'),
+
+    /*
+    |--------------------------------------------------------------------------
     | 3D Secure (opcional, por comercio)
     |--------------------------------------------------------------------------
     |
