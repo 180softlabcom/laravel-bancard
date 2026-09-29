@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.1] - 2026-09-29
+
+> Después de v2.3.0, el rollback de producción quedó como `unknown` (bien: ya no era un 500) porque **Cloudflare**, delante de `vpos.infonet.com.py`, respondía **403 en HTML** ("Sorry, you have been blocked"). Causa, medida en producción con una clave pública falsa (sin tocar pagos): Cloudflare bloquea los pedidos **HTTP/1.1** que salen con la huella TLS de **OpenSSL 3.0** (Ubuntu 22/24, Forge). Con **HTTP/2** pasan. El User-Agent no influye. Guzzle usa HTTP/1.1 por defecto.
+
+### Fixed
+- **Todas las llamadas a vPOS salen por HTTP/2** (`single_buy`, `charge`, `single_buy/confirmations`, `single_buy/rollback`, `cards/new`, `users_cards`, `delete`). Hay un único punto que arma el cliente HTTP (`http()`).
+- **Sin soporte de HTTP/2 en curl, se usa HTTP/1.1 en vez de fallar.** Guzzle no lo hace solo: con HTTP/2 pedido y libcurl sin soporte, lanza `ConnectException` antes de enviar. El paquete lo chequea con `curl_version()` y deja un aviso en el log (una vez por proceso).
+
+### Added
+- Config **`bancard.http_version`** (`BANCARD_HTTP_VERSION`): `'2.0'` (default) o `'1.1'` para volver al comportamiento anterior.
+
+### Notes
+- Verificado contra el vPOS real (clave pública falsa, sin tocar pagos): la respuesta llega por HTTP/2 y Bancard contesta su JSON (`UnauthorizedOperationError`). Si vPOS no ofreciera HTTP/2, curl baja a 1.1 en la negociación TLS (ALPN).
+- Sin migraciones. 77 tests, 5209 assertions.
+
 ## [2.3.0] - 2026-09-29
 
 > Bug en producción (2026-09-29): un comerciante canceló una orden pagada y `rollbackPayment()` devolvió **HTTP 500**. Bancard respondió un cuerpo que no era JSON; `$response->json()` dio `null` y `logResponse(string, array $data)` lanzó un `TypeError` que se escapaba del `catch (Exception)` (un `TypeError` es un `Error`, no una `Exception`). El mismo patrón estaba en las 7 operaciones que llaman a Bancard.

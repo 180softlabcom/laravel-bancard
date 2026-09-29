@@ -4,6 +4,7 @@ namespace Softlab180\Bancard\Services;
 
 use GuzzleHttp\Exception\TransferException;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -112,7 +113,7 @@ class BancardVPOSService
         $this->logRequest('single_buy', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy', $requestData);
 
             $responseData = $this->decodeResponse('single_buy', $response, $shopProcessId);
@@ -223,7 +224,7 @@ class BancardVPOSService
         $recorded = false;
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->post($this->baseUrl . '/vpos/api/0.3/charge', $requestData);
 
             $responseData = $this->decodeResponse('charge', $response, $shopProcessId);
@@ -397,7 +398,7 @@ class BancardVPOSService
         $this->logRequest('cards/new', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->post($this->baseUrl . '/vpos/api/0.3/cards/new', $requestData);
 
             $responseData = $this->decodeResponse('cards/new', $response);
@@ -458,7 +459,7 @@ class BancardVPOSService
         $this->logRequest('users/cards', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->post($this->baseUrl . '/vpos/api/0.3/users/' . $userId . '/cards', $requestData);
 
             $responseData = $this->decodeResponse('users/cards', $response);
@@ -572,7 +573,7 @@ class BancardVPOSService
         $this->logRequest('users/cards/delete', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->delete($this->baseUrl . '/vpos/api/0.3/users/' . $userId . '/cards', $requestData);
 
             $responseData = $this->decodeResponse('users/cards/delete', $response);
@@ -637,7 +638,7 @@ class BancardVPOSService
         $this->logRequest('single_buy/confirmations', $requestData);
 
         try {
-            $response = Http::timeout($timeout ?? 30)
+            $response = $this->http($timeout ?? 30)
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy/confirmations', $requestData);
 
             $responseData = $this->decodeResponse('single_buy/confirmations', $response, $shopProcessId);
@@ -724,7 +725,7 @@ class BancardVPOSService
         $this->logRequest('single_buy/rollback', $requestData);
 
         try {
-            $response = Http::timeout(30)
+            $response = $this->http()
                 ->post($this->baseUrl . '/vpos/api/0.3/single_buy/rollback', $requestData);
 
             $responseData = $this->decodeResponse('single_buy/rollback', $response, $shopProcessId);
@@ -1180,6 +1181,63 @@ class BancardVPOSService
                 'data' => $data,
             ]);
         }
+    }
+
+    /**
+     * Cliente HTTP para vPOS. Es el ÚNICO lugar donde se arma: todas las operaciones salen
+     * por acá, con la misma versión de HTTP.
+     */
+    protected function http(int $timeout = 30): PendingRequest
+    {
+        return Http::timeout($timeout)->withOptions(['version' => $this->httpVersion()]);
+    }
+
+    /** Se avisa una sola vez por proceso que se cayó a HTTP/1.1. */
+    private static bool $http2FallbackLogged = false;
+
+    /**
+     * Versión de HTTP para los pedidos a vPOS: bancard.http_version (default '2.0').
+     *
+     * Cloudflare, delante de vPOS, bloquea HTTP/1.1 con la huella TLS de OpenSSL 3.0
+     * (Ubuntu 22/24, Forge); HTTP/2 pasa. Pero si el curl del servidor no soporta HTTP/2,
+     * Guzzle NO cae solo a 1.1: lanza ConnectException antes de enviar (CurlFactory). Por
+     * eso se chequea acá y, sin soporte, se usa '1.1'. Se devuelve como texto porque
+     * Guzzle compara la versión como string ('2.0' / '1.1').
+     */
+    protected function httpVersion(): string
+    {
+        $wanted = (string) config('bancard.http_version', '2.0');
+
+        if (! in_array($wanted, ['2', '2.0'], true)) {
+            return '1.1';
+        }
+
+        if (! $this->curlSupportsHttp2()) {
+            if (! self::$http2FallbackLogged) {
+                self::$http2FallbackLogged = true;
+                Log::warning('Bancard: el curl de este servidor no soporta HTTP/2; se usa HTTP/1.1 hacia vPOS. '
+                    .'Cloudflare puede bloquear esos pedidos (403): conviene instalar curl con HTTP/2.');
+            }
+
+            return '1.1';
+        }
+
+        return '2.0';
+    }
+
+    /**
+     * ¿El libcurl de PHP soporta HTTP/2? Sin la extensión curl, Guzzle usa el stream handler,
+     * que tampoco soporta HTTP/2.
+     */
+    protected function curlSupportsHttp2(): bool
+    {
+        if (! function_exists('curl_version') || ! defined('CURL_VERSION_HTTP2')) {
+            return false;
+        }
+
+        $info = curl_version();
+
+        return is_array($info) && (($info['features'] ?? 0) & CURL_VERSION_HTTP2) === CURL_VERSION_HTTP2;
     }
 
     /**
